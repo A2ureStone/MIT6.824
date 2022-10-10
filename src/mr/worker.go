@@ -1,33 +1,41 @@
 package mr
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"sort"
+	"strconv"
+	"time"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
 
-
-//
 // Map functions return a slice of KeyValue.
-//
 type KeyValue struct {
 	Key   string
 	Value string
 }
 
-//
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
-//
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
-//
 // main/mrworker.go calls this function.
-//
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
@@ -35,14 +43,14 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
-
+	for AskTask(mapf, reducef) {
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
-//
 // example function to show how to make an RPC call to the coordinator.
 //
 // the RPC argument and reply types are defined in rpc.go.
-//
 func CallExample() {
 
 	// declare an argument structure.
@@ -61,22 +69,214 @@ func CallExample() {
 	ok := call("Coordinator.Example", &args, &reply)
 	if ok {
 		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.Y)
+		//fmt.Printf("reply.Y %v\n", reply.Y)
 	} else {
-		fmt.Printf("call failed!\n")
+		//fmt.Printf("call failed!\n")
 	}
 }
 
-//
+func AskTask(mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string) bool {
+
+	// declare an argument structure.
+	args := TaskRequestArgs{os.Getpid()}
+	//fmt.Printf("Worker: %v is asking task\n", args.WorkerId)
+
+	// declare a reply structure.
+	reply := TaskRequestReply{}
+
+	// send the RPC request, wait for the reply.
+	// the "Coordinator.Example" tells the
+	// receiving server that we'd like to call
+	// the Example() method of struct Coordinator.
+	ok := call("Coordinator.AssignWork", &args, &reply)
+	if ok {
+		// reply.Y should be 100.
+		if reply.Wait {
+			//fmt.Printf("worker pid:%v receive wait-signal from master\n", os.Getpid())
+			return true
+		}
+	} else {
+		//fmt.Printf("rpc call failed!\n")
+		return false
+	}
+
+	dir, err := os.Getwd()
+	if err != nil {
+		log.Fatalf("cannot get work directory\n")
+	}
+
+	if reply.MapTask {
+		//fmt.Printf("Receive Map task, filename: %v\n", reply.TaskFileName[0])
+		file, err := os.Open(reply.TaskFileName[0])
+		if err != nil {
+			log.Fatalf("cannot open %v", reply.TaskFileName)
+		}
+		intermediate := []KeyValue{}
+		content, err := ioutil.ReadAll(file)
+		if err != nil {
+			log.Fatalf("cannot read %v", reply.TaskFileName)
+		}
+		err = file.Close()
+		if err != nil {
+			log.Fatalf("fail to close the given map file\n")
+		}
+		// is a map task, deliver to map function
+		kva := mapf(reply.TaskFileName[0], string(content))
+		intermediate = append(intermediate, kva...)
+
+		//for _, elem := range kva {
+		//	//fmt.Printf("Output %v\n", elem)
+		//}
+
+		// hash kv to partition
+		partition := make(map[int][]KeyValue)
+		for _, kv := range kva {
+			pa_num := ihash(kv.Key) % reply.PartitionNum
+			////fmt.Printf("hashing %v to %v\n", kv, pa_num)
+			partition[pa_num] = append(partition[pa_num], kv)
+		}
+		// create tmp file to store map result
+		tmp_file_array := make([]string, reply.PartitionNum)
+		for i := 0; i < reply.PartitionNum; i += 1 {
+			f, err := ioutil.TempFile(dir, "MapTask"+strconv.Itoa(reply.TaskId))
+			if err != nil {
+				log.Fatalf("create tempfile failed\n")
+			}
+			defer func(f *os.File) {
+				err := f.Close()
+				if err != nil {
+					log.Fatalf("fail to close tmp file\n")
+				}
+			}(f)
+			tmp_file_array[i] = f.Name()
+			enc := json.NewEncoder(f)
+			for _, kv := range partition[i] {
+				////fmt.Printf("encoding %v\n", kv)
+				err := enc.Encode(&kv)
+				if err != nil {
+					log.Fatalf("json write error\n")
+				}
+			}
+		}
+		// atomic change the filename
+		m_res := TaskResult{reply.TaskId, true, make([]string, reply.PartitionNum)}
+		for pa, f := range tmp_file_array {
+			////fmt.Printf("working dir: %v\n", dir)
+			////fmt.Printf("tmp file name: %v\n", f)
+			str := dir + "/" + "mr-" + strconv.Itoa(reply.TaskId) + "-" + strconv.Itoa(pa)
+			err = os.Rename(f, str)
+			if err != nil {
+				//fmt.Printf("rename error\n")
+			}
+			m_res.Res[pa] = str
+		}
+		m_end := TaskEnd{}
+		ok = call("Coordinator.ReceiveMapRes", &m_res, &m_end)
+		if ok {
+			//fmt.Printf("worker pid:%v send map task%v result successfully\n", os.Getpid(), reply.TaskId)
+		} else {
+			//fmt.Printf("worker pid:%v send map task%v result fail\n", os.Getpid(), reply.TaskId)
+		}
+		if m_end.Success {
+			//fmt.Printf("worker pid:%v send map task%v reply successfully\n", os.Getpid(), reply.TaskId)
+		} else {
+			//fmt.Printf("worker pid:%v send map task%v reply fail\n", os.Getpid(), reply.TaskId)
+		}
+		////fmt.Printf("worker pid:%v successfully finish map task%v\n", os.Getpid(), reply.TaskId)
+		//fmt.Printf("worker pid:%v finish map task%v\n", os.Getpid(), reply.TaskId)
+	} else {
+		intermediate := []KeyValue{}
+		for i := 0; i < len(reply.TaskFileName); i += 1 {
+			f, err := os.Open(reply.TaskFileName[i])
+			if err != nil {
+				log.Fatalf("cannot open %v\n", reply.TaskFileName)
+			}
+			defer func(f *os.File) {
+				err := f.Close()
+				if err != nil {
+					log.Fatalf("cannot close %v\n", reply.TaskFileName)
+				}
+			}(f)
+			////fmt.Printf("decode open filename: %v\n", reply.TaskFileName[i])
+			dec := json.NewDecoder(f)
+			for {
+				var kv KeyValue
+				if err := dec.Decode(&kv); err != nil {
+					// eof
+					break
+				}
+				intermediate = append(intermediate, kv)
+			}
+
+		}
+
+		sort.Sort(ByKey(intermediate))
+
+		oname := "reduce-" + strconv.Itoa(reply.TaskId) + "-*"
+		ofile, err := ioutil.TempFile(dir, oname)
+		if err != nil {
+			log.Fatalf("cannot create tmp file %v\n", oname)
+		}
+
+		//
+		// call Reduce on each distinct key in intermediate[],
+		// and print the result to mr-out-0.
+		//
+		i := 0
+		for i < len(intermediate) {
+			j := i + 1
+			for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+				j++
+			}
+			values := []string{}
+			for k := i; k < j; k++ {
+				values = append(values, intermediate[k].Value)
+			}
+			output := reducef(intermediate[i].Key, values)
+
+			// this is the correct format for each line of Reduce output.
+			fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+			i = j
+		}
+		if err = ofile.Close(); err != nil {
+			log.Fatalf("cannot close tmp file %v\n", oname)
+		}
+		oname = "/mr-out-" + strconv.Itoa(reply.TaskId)
+		if err = os.Rename(ofile.Name(), dir+oname); err != nil {
+			//fmt.Printf("rename error\n")
+		}
+		//fmt.Printf("worker pid:%v finish reduce task%v\n", os.Getpid(), reply.TaskId)
+
+		r_res := TaskResult{TaskId: reply.TaskId, MapTask: false}
+		r_end := TaskEnd{}
+		ok = call("Coordinator.ReceiveMapRes", &r_res, &r_end)
+		if ok {
+			//fmt.Printf("worker pid:%v send reduce task%v result successfully\n", os.Getpid(), reply.TaskId)
+		} else {
+			//fmt.Printf("worker pid:%v send reduce task%v result fail\n", os.Getpid(), reply.TaskId)
+		}
+		if r_end.Success {
+			//fmt.Printf("worker pid:%v send reduce task%v reply successfully\n", os.Getpid(), reply.TaskId)
+		} else {
+			//fmt.Printf("worker pid:%v send reduce task%v reply fail\n", os.Getpid(), reply.TaskId)
+		}
+
+	}
+	return true
+}
+
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-//
 func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
+		// process may end here
+		//log.Printf("dial http-fail\n")
 		log.Fatal("dialing:", err)
 	}
 	defer c.Close()
