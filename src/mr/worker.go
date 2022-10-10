@@ -125,15 +125,10 @@ func AskTask(mapf func(string, string) []KeyValue,
 		kva := mapf(reply.TaskFileName[0], string(content))
 		intermediate = append(intermediate, kva...)
 
-		//for _, elem := range kva {
-		//	//fmt.Printf("Output %v\n", elem)
-		//}
-
 		// hash kv to partition
 		partition := make(map[int][]KeyValue)
 		for _, kv := range kva {
 			pa_num := ihash(kv.Key) % reply.PartitionNum
-			////fmt.Printf("hashing %v to %v\n", kv, pa_num)
 			partition[pa_num] = append(partition[pa_num], kv)
 		}
 		// create tmp file to store map result
@@ -152,7 +147,6 @@ func AskTask(mapf func(string, string) []KeyValue,
 			tmp_file_array[i] = f.Name()
 			enc := json.NewEncoder(f)
 			for _, kv := range partition[i] {
-				////fmt.Printf("encoding %v\n", kv)
 				err := enc.Encode(&kv)
 				if err != nil {
 					log.Fatalf("json write error\n")
@@ -162,29 +156,18 @@ func AskTask(mapf func(string, string) []KeyValue,
 		// atomic change the filename
 		m_res := TaskResult{reply.TaskId, true, make([]string, reply.PartitionNum)}
 		for pa, f := range tmp_file_array {
-			////fmt.Printf("working dir: %v\n", dir)
-			////fmt.Printf("tmp file name: %v\n", f)
 			str := dir + "/" + "mr-" + strconv.Itoa(reply.TaskId) + "-" + strconv.Itoa(pa)
 			err = os.Rename(f, str)
 			if err != nil {
-				//fmt.Printf("rename error\n")
+				log.Fatalf("rename error\n")
 			}
 			m_res.Res[pa] = str
 		}
 		m_end := TaskEnd{}
-		ok = call("Coordinator.ReceiveMapRes", &m_res, &m_end)
-		if ok {
-			//fmt.Printf("worker pid:%v send map task%v result successfully\n", os.Getpid(), reply.TaskId)
-		} else {
-			//fmt.Printf("worker pid:%v send map task%v result fail\n", os.Getpid(), reply.TaskId)
+		ok = call("Coordinator.ReceiveRes", &m_res, &m_end)
+		if !ok {
+			return false
 		}
-		if m_end.Success {
-			//fmt.Printf("worker pid:%v send map task%v reply successfully\n", os.Getpid(), reply.TaskId)
-		} else {
-			//fmt.Printf("worker pid:%v send map task%v reply fail\n", os.Getpid(), reply.TaskId)
-		}
-		////fmt.Printf("worker pid:%v successfully finish map task%v\n", os.Getpid(), reply.TaskId)
-		//fmt.Printf("worker pid:%v finish map task%v\n", os.Getpid(), reply.TaskId)
 	} else {
 		intermediate := []KeyValue{}
 		for i := 0; i < len(reply.TaskFileName); i += 1 {
@@ -198,7 +181,6 @@ func AskTask(mapf func(string, string) []KeyValue,
 					log.Fatalf("cannot close %v\n", reply.TaskFileName)
 				}
 			}(f)
-			////fmt.Printf("decode open filename: %v\n", reply.TaskFileName[i])
 			dec := json.NewDecoder(f)
 			for {
 				var kv KeyValue
@@ -208,11 +190,8 @@ func AskTask(mapf func(string, string) []KeyValue,
 				}
 				intermediate = append(intermediate, kv)
 			}
-
 		}
-
 		sort.Sort(ByKey(intermediate))
-
 		oname := "reduce-" + strconv.Itoa(reply.TaskId) + "-*"
 		ofile, err := ioutil.TempFile(dir, oname)
 		if err != nil {
@@ -245,24 +224,16 @@ func AskTask(mapf func(string, string) []KeyValue,
 		}
 		oname = "/mr-out-" + strconv.Itoa(reply.TaskId)
 		if err = os.Rename(ofile.Name(), dir+oname); err != nil {
-			//fmt.Printf("rename error\n")
+			log.Fatalf("rename error\n")
 		}
 		//fmt.Printf("worker pid:%v finish reduce task%v\n", os.Getpid(), reply.TaskId)
 
 		r_res := TaskResult{TaskId: reply.TaskId, MapTask: false}
 		r_end := TaskEnd{}
-		ok = call("Coordinator.ReceiveMapRes", &r_res, &r_end)
-		if ok {
-			//fmt.Printf("worker pid:%v send reduce task%v result successfully\n", os.Getpid(), reply.TaskId)
-		} else {
-			//fmt.Printf("worker pid:%v send reduce task%v result fail\n", os.Getpid(), reply.TaskId)
+		ok = call("Coordinator.ReceiveRes", &r_res, &r_end)
+		if !ok {
+			return false
 		}
-		if r_end.Success {
-			//fmt.Printf("worker pid:%v send reduce task%v reply successfully\n", os.Getpid(), reply.TaskId)
-		} else {
-			//fmt.Printf("worker pid:%v send reduce task%v reply fail\n", os.Getpid(), reply.TaskId)
-		}
-
 	}
 	return true
 }

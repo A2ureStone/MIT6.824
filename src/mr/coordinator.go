@@ -52,7 +52,6 @@ func (c *Coordinator) AssignWork(args *TaskRequestArgs, reply *TaskRequestReply)
 		if curr.Sub(v) >= 10000*time.Millisecond {
 			delete(c.working, k)
 			c.waiting = append(c.waiting, k)
-			//fmt.Printf("adding work%v\n", k)
 		}
 	}
 	last_idx := len(c.waiting) - 1
@@ -66,7 +65,6 @@ func (c *Coordinator) AssignWork(args *TaskRequestArgs, reply *TaskRequestReply)
 	c.waiting = c.waiting[:last_idx]
 	c.working[reply.TaskId] = time.Now()
 	if c.map_work {
-		//reply.TaskFileName = c.split[reply.TaskId]
 		reply.TaskFileName = make([]string, 1)
 		reply.TaskFileName[0] = c.split[reply.TaskId]
 		reply.PartitionNum = c.num_reduce
@@ -88,7 +86,7 @@ func (c *Coordinator) AssignWork(args *TaskRequestArgs, reply *TaskRequestReply)
 	return nil
 }
 
-func (c *Coordinator) ReceiveMapRes(args *TaskResult, reply *TaskEnd) error {
+func (c *Coordinator) ReceiveRes(args *TaskResult, reply *TaskEnd) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.map_work {
@@ -99,15 +97,11 @@ func (c *Coordinator) ReceiveMapRes(args *TaskResult, reply *TaskEnd) error {
 		if c.map_res[args.TaskId] != nil {
 			return nil
 		}
-		////fmt.Printf("receive map%v success\n", args.TaskId)
+		//fmt.Printf("receive map%v success\n", args.TaskId)
 		delete(c.working, args.TaskId)
 		// remove in working, even if exceed time
-		//for _, v := range args.Res {
-		//////fmt.Printf("target file: %v\n", v)
-		//}
 		c.map_receive += 1
 		c.map_res[args.TaskId] = args.Res
-		reply.Success = true
 		if c.map_receive == len(c.map_res) {
 			c.map_work = false
 			// adding reduce work to queue
@@ -121,7 +115,6 @@ func (c *Coordinator) ReceiveMapRes(args *TaskResult, reply *TaskEnd) error {
 			return nil
 		}
 		// even if many reduce tasks to same task id, is safe
-		reply.Success = true
 		delete(c.working, args.TaskId)
 	}
 	return nil
