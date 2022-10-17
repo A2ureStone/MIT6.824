@@ -243,6 +243,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		// need change in later lab
 		log.Printf("server %v receive request vote, vote for %v\n", rf.me, args.CandidateId)
+		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		reply.Term = rf.currTerm
 	}
