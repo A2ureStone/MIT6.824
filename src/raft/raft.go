@@ -326,13 +326,6 @@ func (rf *Raft) sendRequestVote(term int, server int) {
 	}
 	DPrintf("server %v return from RPC to %v, receive reply\n", rf.me, server)
 
-	// check for reply term
-	if rf.currTerm < reply.Term {
-		DPrintf("server %v sending request vote RPC to %v, receive a reply which term greater than itself\n", rf.me, server)
-		rf.toFollower(reply.Term)
-		return
-	}
-
 	rf.grabLock()
 	defer rf.releaseLock()
 	// case for time-out again
@@ -343,6 +336,12 @@ func (rf *Raft) sendRequestVote(term int, server int) {
 	// case for converting to a follower or being a leader
 	if rf.state != 1 {
 		DPrintf("server %v sending request vote RPC to %v, receive reply, but state changed to %v\n", rf.me, server, rf.state)
+		return
+	}
+	// check for reply term
+	if rf.currTerm < reply.Term {
+		DPrintf("server %v sending request vote RPC to %v, receive a reply which term greater than itself\n", rf.me, server)
+		rf.toFollower(reply.Term)
 		return
 	}
 
@@ -534,6 +533,35 @@ func (rf *Raft) toFollower(term int) {
 	rf.votedFor = -1
 }
 
+func (rf *Raft) HeartBeat(term int, server int) {
+	// rf.me is read only
+	//DPrintf("server %v is a leader, sending heartbeat to %v\n", rf.me, server)
+	args := AppendEntryArgs{Term: term, LeaderId: rf.me}
+	reply := AppendEntryReply{}
+	ok := rf.sendAppendEntry(server, &args, &reply)
+	if !ok {
+		//DPrintf("raft.go::sendHeartBeat() send append entry fail\n")
+		return
+	}
+	DPrintf("server %v is a leader, getting heartbeat reply from %v\n", rf.me, server)
+	rf.grabLock()
+	defer rf.releaseLock()
+	// no need this, when term changed, leader must be follower
+	//if rf.currTerm != term {
+	//	DPrintf("server %v is a leader, getting heartbeat reply from %v, its term has been changed\n", rf.me, server)
+	//	return
+	//}
+	// guard for case, do we need this?
+	if rf.state != 2 {
+		DPrintf("server %v is a leader, getting heartbeat reply from %v, but is not a leader now\n", rf.me, server)
+		return
+	}
+	if rf.currTerm < reply.Term {
+		DPrintf("server %v is a leader, getting heartbeat reply from %v, the reply has a higher term, turn into follower\n", rf.me, server)
+		rf.toFollower(reply.Term)
+	}
+}
+
 // when call this function, must hold rf.mu unless the first initialize
 func (rf *Raft) freshReceiveTime() {
 	rf.lastReceiveTime = time.Now()
@@ -549,30 +577,7 @@ func (rf *Raft) sendHeartBeat() {
 				rf.releaseLock()
 				for idx, _ := range rf.peers {
 					if idx != rf.me {
-						go func(term int, server int) {
-							// rf.me is read only
-							//DPrintf("server %v is a leader, sending heartbeat to %v\n", rf.me, server)
-							args := AppendEntryArgs{Term: term, LeaderId: rf.me}
-							reply := AppendEntryReply{}
-							ok := rf.sendAppendEntry(server, &args, &reply)
-							if !ok {
-								//DPrintf("raft.go::sendHeartBeat() send append entry fail\n")
-								return
-							}
-							DPrintf("server %v is a leader, getting heartbeat reply from %v\n", rf.me, server)
-							rf.grabLock()
-							defer rf.releaseLock()
-							// guard for case, do we need this?
-							if rf.state != 2 {
-								DPrintf("server %v is a leader, getting heartbeat reply from %v, but is not a leader now\n", rf.me, server)
-								return
-							}
-							if rf.currTerm < reply.Term {
-								DPrintf("server %v is a leader, getting heartbeat reply from %v, the reply has a higher term, turn into follower\n", rf.me, server)
-								rf.toFollower(reply.Term)
-							}
-
-						}(term, idx)
+						go rf.HeartBeat(term, idx)
 					}
 				}
 			} else {
