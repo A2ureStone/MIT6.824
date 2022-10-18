@@ -303,9 +303,65 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
+func (rf *Raft) sendRequestVote(term int, server int) {
+	args := RequestVoteArgs{}
+	reply := RequestVoteReply{}
+	//DPrintf("server %v sending request vote RPC to %v, turn into candidate\n", rf.me, server)
+	// whether we need this??
+	rf.grabLock()
+	if rf.state != 1 {
+		// not candidate
+		DPrintf("server %v sending request vote RPC to %v, but canceled because of state turn into:%v\n", rf.me, server, rf.state)
+		rf.releaseLock()
+		return
+	}
+	rf.releaseLock()
+	// leave log content nil
+	args.Term = term
+	args.CandidateId = rf.me
+	ok := rf.peers[server].Call("Raft.RequestVote", &args, &reply)
+	if !ok {
+		//DPrintf("raft.go::ticker() send request vote to %v fail\n", server)
+		return
+	}
+	DPrintf("server %v return from RPC to %v, receive reply\n", rf.me, server)
+
+	// check for reply term
+	if rf.currTerm < reply.Term {
+		DPrintf("server %v sending request vote RPC to %v, receive a reply which term greater than itself\n", rf.me, server)
+		rf.toFollower(reply.Term)
+		return
+	}
+
+	rf.grabLock()
+	defer rf.releaseLock()
+	// case for time-out again
+	if rf.currTerm != term {
+		DPrintf("server %v return from RPC but its term changed\n", server)
+		return
+	}
+	// case for converting to a follower or being a leader
+	if rf.state != 1 {
+		DPrintf("server %v sending request vote RPC to %v, receive reply, but state changed to %v\n", rf.me, server, rf.state)
+		return
+	}
+
+	// do nothing, if already get majority votes
+	if reply.VoteGranted {
+		rf.voteNums++
+		DPrintf("server %v sending request vote RPC to %v, receive a reply which vote granted\n", rf.me, server)
+	}
+	majority := len(rf.peers) / 2
+	if len(rf.peers)%2 != 0 {
+		majority++
+	}
+	if rf.voteNums >= majority { // become leader
+		DPrintf("server %v sending request vote RPC, become a leader\n", rf.me)
+		rf.state = 2
+		// fire a go routine to send heartbeat
+		rf.lastSendTime = time.Now()
+		go rf.sendHeartBeat()
+	}
 }
 
 func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *AppendEntryReply) bool {
@@ -388,61 +444,7 @@ func (rf *Raft) ticker() {
 				for idx, _ := range rf.peers {
 					if idx != rf.me {
 						// this go routine used for request vote rpc
-						go func(term int, server int) {
-							args := RequestVoteArgs{}
-							reply := RequestVoteReply{}
-							//DPrintf("server %v sending request vote RPC to %v, turn into candidate\n", rf.me, server)
-							// whether we need this??
-							rf.grabLock()
-							if rf.state != 1 {
-								// not candidate
-								DPrintf("server %v sending request vote RPC to %v, but canceled because of state turn into:%v\n", rf.me, server, rf.state)
-								rf.releaseLock()
-								return
-							}
-							rf.releaseLock()
-							// leave log content nil
-							args.Term = term
-							args.CandidateId = rf.me
-							ok := rf.sendRequestVote(server, &args, &reply)
-
-							rf.grabLock()
-							defer rf.releaseLock()
-							if !ok {
-								//DPrintf("raft.go::ticker() send request vote to %v fail\n", server)
-								return
-							}
-							DPrintf("server %v sending request vote RPC to %v, receive reply\n", rf.me, server)
-							// case for converting to a follower or being a leader
-							if rf.state != 1 {
-								DPrintf("server %v sending request vote RPC to %v, receive reply, but state changed to %v\n", rf.me, server, rf.state)
-								return
-							}
-							// check for reply term
-							if rf.currTerm < reply.Term {
-								DPrintf("server %v sending request vote RPC to %v, receive a reply which term greater than itself\n", rf.me, server)
-								rf.toFollower(reply.Term)
-								return
-							}
-
-							// do nothing, if already get majority votes
-							if reply.VoteGranted {
-								rf.voteNums++
-								DPrintf("server %v sending request vote RPC to %v, receive a reply which vote granted\n", rf.me, server)
-							}
-							majority := len(rf.peers) / 2
-							if len(rf.peers)%2 != 0 {
-								majority++
-							}
-							if rf.voteNums >= majority { // become leader
-								DPrintf("server %v sending request vote RPC, become a leader\n", rf.me)
-								rf.state = 2
-								// fire a go routine to send heartbeat
-								rf.lastSendTime = time.Now()
-								go rf.sendHeartBeat()
-							}
-
-						}(copy_term, idx)
+						go rf.sendRequestVote(copy_term, idx)
 					}
 				}
 			} else {
@@ -456,22 +458,67 @@ func (rf *Raft) ticker() {
 	}
 }
 
-//func (rf *Raft) waitForVote(wg *sync.WaitGroup) {
-//	wg.Wait()
-//	rf.grabLock()
-//	defer rf.releaseLock()
-//	DPrintf("server %v already wait for all server\n", rf.me)
-//	majority := rf.reachableNums / 2
-//	if rf.reachableNums%2 != 0 {
-//		majority++
-//	}
-//	if rf.voteNums >= majority {
-//		// become leader //		DPrintf("server %v sending request vote RPC, become a leader\n", rf.me) //		rf.state = 2
-//		// fire a go routine to send heartbeat
-//		rf.lastSendTime = time.Now()
-//		go rf.sendHeartBeat()
-//	}
-//}
+func (rf *Raft) sendVote(term int, server int) {
+	args := RequestVoteArgs{}
+	reply := RequestVoteReply{}
+	//DPrintf("server %v sending request vote RPC to %v, turn into candidate\n", rf.me, server)
+	// whether we need this??
+	rf.grabLock()
+	if rf.state != 1 {
+		// not candidate
+		DPrintf("server %v sending request vote RPC to %v, but canceled because of state turn into:%v\n", rf.me, server, rf.state)
+		rf.releaseLock()
+		return
+	}
+	rf.releaseLock()
+	// leave log content nil
+	args.Term = term
+	args.CandidateId = rf.me
+	//ok := rf.sendRequestVote(server, &args, &reply)
+	ok := true
+	if !ok {
+		//DPrintf("raft.go::ticker() send request vote to %v fail\n", server)
+		return
+	}
+	DPrintf("server %v return from RPC to %v, receive reply\n", rf.me, server)
+
+	// check for reply term
+	if rf.currTerm < reply.Term {
+		DPrintf("server %v sending request vote RPC to %v, receive a reply which term greater than itself\n", rf.me, server)
+		rf.toFollower(reply.Term)
+		return
+	}
+
+	rf.grabLock()
+	defer rf.releaseLock()
+	// case for time-out again
+	if rf.currTerm != term {
+		DPrintf("server %v return from RPC but its term changed\n", server)
+		return
+	}
+	// case for converting to a follower or being a leader
+	if rf.state != 1 {
+		DPrintf("server %v sending request vote RPC to %v, receive reply, but state changed to %v\n", rf.me, server, rf.state)
+		return
+	}
+
+	// do nothing, if already get majority votes
+	if reply.VoteGranted {
+		rf.voteNums++
+		DPrintf("server %v sending request vote RPC to %v, receive a reply which vote granted\n", rf.me, server)
+	}
+	majority := len(rf.peers) / 2
+	if len(rf.peers)%2 != 0 {
+		majority++
+	}
+	if rf.voteNums >= majority { // become leader
+		DPrintf("server %v sending request vote RPC, become a leader\n", rf.me)
+		rf.state = 2
+		// fire a go routine to send heartbeat
+		rf.lastSendTime = time.Now()
+		go rf.sendHeartBeat()
+	}
+}
 
 // when call this function, must hold rf.mu unless the first initialize
 func (rf *Raft) resetTimer() {
