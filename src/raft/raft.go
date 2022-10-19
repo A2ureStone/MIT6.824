@@ -107,6 +107,9 @@ type Raft struct {
 	state            int           // the server state, 0 for follower, 1 for candidate, 2 for leader
 	heartbeatTimeout time.Duration // used for leader to send heartbeat
 	lastSendTime     time.Time     // record the time since send heartbeat message
+
+	// lab2b
+	updateLastApplied *sync.Cond // conditional variable for update lastApplied
 }
 
 // return currentTerm and whether this server
@@ -230,21 +233,28 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	DPrintf("server %v receive RequestVote RPC\n", rf.me)
 	// reset receive time for RequestVote RPC
 	rf.freshReceiveTime()
+	reply.Term = rf.currTerm
+	reply.VoteGranted = false
 	if args.Term < rf.currTerm {
-		DPrintf("server %v receive request vote which term less than itself, return false\n", rf.me)
-		reply.Term = rf.currTerm
-		reply.VoteGranted = false
+		//DPrintf("server %v receive request vote which term less than itself, return false\n", rf.me)
 		return
 	} else if rf.currTerm < args.Term {
-		DPrintf("server %v receive request vote which term larger than itself, turn into follower\n", rf.me)
+		//DPrintf("server %v receive request vote which term larger than itself, turn into follower\n", rf.me)
 		rf.toFollower(args.Term)
 	}
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+		last_idx := len(rf.log) - 1
+		last_log_term := rf.log[last_idx].Term
+		if last_log_term == args.LastLogTerm && last_idx > args.LastLogIndex {
+			return
+		}
+		if last_log_term > args.LastLogTerm {
+			return
+		}
 		// need change in later lab
 		DPrintf("server %v receive request vote, vote for %v\n", rf.me, args.CandidateId)
-		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
-		reply.Term = rf.currTerm
+		rf.votedFor = args.CandidateId
 	}
 }
 
@@ -256,21 +266,37 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	DPrintf("server %v receive AppendEntry RPC\n", rf.me)
 	// reset receive time for AppendEntry RPC
 	rf.freshReceiveTime()
+	reply.Term = rf.currTerm
+	reply.Success = false
 	if rf.currTerm < args.Term {
 		// convert to follower
 		DPrintf("server %v receive AppendEntry RPC which term greater than itself, and turn into follower\n", rf.me)
 		rf.toFollower(args.Term)
 	} else if args.Term < rf.currTerm {
 		DPrintf("server %v receive AppendEntry RPC which term less than itself, return false\n", rf.me)
-		reply.Success = false
-		reply.Term = rf.currTerm
+		// return false
 		return
 	}
 	// check for candidate, receive AppendEntry RPC from leader
+	// even for candidate change to follower, it can still reply this appendentry
 	if rf.state == 1 {
 		DPrintf("server %v receive AppendEntry RPC from another leader, turn into follower\n", rf.me)
 		// here is the term correctly??
 		rf.toFollower(args.Term)
+	}
+	if len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		// here we will return false
+		return
+	}
+	reply.Success = true
+	rf.log = rf.log[:args.PrevLogIndex+1]
+	rf.log = append(rf.log, args.Entries...)
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = len(rf.log) - 1
+		if rf.commitIndex > args.LeaderCommit {
+			rf.commitIndex = args.LeaderCommit
+		}
+		rf.updateLastApplied.Broadcast()
 	}
 }
 
@@ -364,8 +390,6 @@ func (rf *Raft) sendRequestVote(term int, server int) {
 }
 
 func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *AppendEntryReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntry", args, reply)
-	return ok
 }
 
 //
@@ -475,7 +499,7 @@ func (rf *Raft) sendVote(term int, server int) {
 	// leave log content nil
 	args.Term = term
 	args.CandidateId = rf.me
-	args.LastLogIndex = len(rf.log)
+	args.LastLogIndex = len(rf.log) - 1
 	args.LastLogTerm = rf.log[args.LastLogIndex].Term
 	//ok := rf.sendRequestVote(server, &args, &reply)
 	ok := true
@@ -537,6 +561,9 @@ func (rf *Raft) toFollower(term int) {
 	rf.votedFor = -1
 }
 
+// HeartBeat
+// a go routine to periodically send heartbeat
+//
 func (rf *Raft) HeartBeat(term int, server int) {
 	// rf.me is read only
 	//DPrintf("server %v is a leader, sending heartbeat to %v\n", rf.me, server)
@@ -571,6 +598,9 @@ func (rf *Raft) freshReceiveTime() {
 	rf.lastReceiveTime = time.Now()
 }
 
+//
+// a go routine to send single heartbeat rpc
+//
 func (rf *Raft) sendHeartBeat() {
 	for rf.killed() == false {
 		rf.grabLock()
@@ -596,6 +626,21 @@ func (rf *Raft) sendHeartBeat() {
 }
 
 //
+// a go routine to update lastApplied
+//
+func (rf *Raft) applyEntry() {
+	for rf.killed() == false {
+		rf.grabLock()
+		for rf.lastApplied == rf.commitIndex {
+			rf.updateLastApplied.Wait()
+		}
+		// single update, nowhere to apply entry
+		rf.lastApplied = rf.commitIndex
+		rf.releaseLock()
+	}
+}
+
+// Make
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -626,6 +671,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = 0
 	rf.resetTimer()
 	rf.heartbeatTimeout = time.Duration(125) * time.Millisecond
+	rf.updateLastApplied = sync.NewCond(&rf.mu)
 
 	// Your initialization code here (2A, 2B, 2C).
 
@@ -634,6 +680,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.applyEntry()
 
 	return rf
 }
