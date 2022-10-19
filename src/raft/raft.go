@@ -20,6 +20,8 @@ package raft
 import (
 	//"crypto/rand"
 	"math/rand"
+	"sort"
+
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -247,9 +249,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		last_idx := len(rf.log) - 1
 		last_log_term := rf.log[last_idx].Term
 		if last_log_term == args.LastLogTerm && last_idx > args.LastLogIndex {
+			DPrintf("server %v receive request vote, reject for same-term log index inconsistency\n", rf.me)
 			return
 		}
 		if last_log_term > args.LastLogTerm {
+			DPrintf("server %v receive request vote, reject for my log term %v, receive log term %v\n", rf.me, last_log_term, args.LastLogIndex)
 			return
 		}
 		// need change in later lab
@@ -273,10 +277,10 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	reply.Success = false
 	if rf.currTerm < args.Term {
 		// convert to follower
-		DPrintf("server %v receive AppendEntry RPC which term greater than itself, and turn into follower\n", rf.me)
+		DPrintf("server %v receive AppendEntry RPC which term %v greater than itself %v, and turn into follower\n", rf.me, args.Term, rf.currTerm)
 		rf.toFollower(args.Term)
 	} else if args.Term < rf.currTerm {
-		DPrintf("server %v receive AppendEntry RPC which term less than itself, return false\n", rf.me)
+		DPrintf("server %v receive AppendEntry RPC which term %v less than itself %v, return false\n", rf.me, args.Term, rf.currTerm)
 		// return false
 		return
 	}
@@ -295,7 +299,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	reply.Success = true
 	rf.log = rf.log[:args.PrevLogIndex+1]
 	rf.log = append(rf.log, args.Entries...)
-	DPrintf("server %v receive AppendEntry RPC , check log %v\n", rf.me, rf.log)
+	//DPrintf("server %v receive AppendEntry RPC , check log %v\n", rf.me, rf.log)
 	if len(args.Entries) > 0 {
 		DPrintf("server %v receive AppendEntry RPC , append entry to log\n", rf.me)
 	}
@@ -361,6 +365,9 @@ func (rf *Raft) sendRequestVote(term int, server int) {
 	// leave log content nil
 	args.Term = term
 	args.CandidateId = rf.me
+	args.LastLogIndex = len(rf.log) - 1
+	args.LastLogTerm = rf.log[args.LastLogIndex].Term
+
 	ok := rf.peers[server].Call("Raft.RequestVote", &args, &reply)
 	if !ok {
 		//DPrintf("raft.go::ticker() send request vote to %v fail\n", server)
@@ -447,12 +454,12 @@ func (rf *Raft) sendAppendEntry(term int, server int) {
 		// log matching property
 		rf.matchIndex[server] = len(rf.log) - 1
 		DPrintf("server %v is a leader, getting heartbeat reply from %v, check matchIdx %v\n", rf.me, server, rf.matchIndex)
-		min_match := int(^uint(0) >> 1)
-		for idx := 0; idx < len(rf.peers); idx++ {
-			if idx != rf.me && rf.matchIndex[idx] < min_match {
-				min_match = rf.matchIndex[idx]
-			}
-		}
+		// a majority match
+		rf.matchIndex[rf.me] = len(rf.log) - 1
+		sort_lst := make([]int, len(rf.peers))
+		copy(sort_lst, rf.matchIndex)
+		sort.Ints(sort_lst)
+		min_match := sort_lst[len(rf.peers)/2]
 		DPrintf("server %v is a leader, getting heartbeat reply from %v, min_match: %v\n", rf.me, server, min_match)
 		// only commit current term in case for duplicate commit
 		if min_match > rf.commitIndex && rf.log[min_match].Term == rf.currTerm {
@@ -490,7 +497,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	DPrintf("server %v is a leader, receive a command\n", rf.me)
 	rf.log = append(rf.log, LogEntry{command, rf.currTerm})
-	DPrintf("server %v is a leader, check log %v\n", rf.me, rf.log)
+	//DPrintf("server %v is a leader, check log %v\n", rf.me, rf.log)
 	DPrintf("server %v is a leader, append entry at index %v\n", rf.me, len(rf.log)-1)
 
 	return len(rf.log) - 1, rf.currTerm, true
