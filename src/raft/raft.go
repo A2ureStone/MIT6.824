@@ -383,13 +383,15 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *Append
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.state != 2 {
+		return -1, -1, false
+	}
+	rf.log = append(rf.log, LogEntry{command, rf.currTerm})
 
-	return index, term, isLeader
+	return len(rf.log), rf.currTerm, true
 }
 
 //
@@ -473,6 +475,8 @@ func (rf *Raft) sendVote(term int, server int) {
 	// leave log content nil
 	args.Term = term
 	args.CandidateId = rf.me
+	args.LastLogIndex = len(rf.log)
+	args.LastLogTerm = rf.log[args.LastLogIndex].Term
 	//ok := rf.sendRequestVote(server, &args, &reply)
 	ok := true
 	if !ok {
@@ -538,7 +542,7 @@ func (rf *Raft) HeartBeat(term int, server int) {
 	//DPrintf("server %v is a leader, sending heartbeat to %v\n", rf.me, server)
 	args := AppendEntryArgs{Term: term, LeaderId: rf.me}
 	reply := AppendEntryReply{}
-	ok := rf.sendAppendEntry(server, &args, &reply)
+	ok := rf.peers[server].Call("Raft.AppendEntry", &args, &reply)
 	if !ok {
 		//DPrintf("raft.go::sendHeartBeat() send append entry fail\n")
 		return
@@ -611,11 +615,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currTerm = 0
 	// -1 means none
 	rf.votedFor = -1
-	rf.log = nil
+	rf.log = make([]LogEntry, 1)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
-	rf.nextIndex = nil
-	rf.matchIndex = nil
+	rf.nextIndex = make([]int, len(rf.peers))
+	for idx := range rf.nextIndex {
+		rf.nextIndex[idx] = 1
+	}
+	rf.matchIndex = make([]int, len(rf.peers))
 	rf.state = 0
 	rf.resetTimer()
 	rf.heartbeatTimeout = time.Duration(125) * time.Millisecond
