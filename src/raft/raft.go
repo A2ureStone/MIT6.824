@@ -71,6 +71,10 @@ type AppendEntryArgs struct {
 type AppendEntryReply struct {
 	Term    int  // current term for follower, for leader to update itself
 	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+
+	XTerm  int // term of the conflict entry in follower, -1 represents no conflict entry
+	XIndex int // index of the conflict entry in follower
+	XLen   int // len of the follower log
 }
 
 //
@@ -294,6 +298,17 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	if len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		// here we will return false
 		DPrintf("server %v receive AppendEntry RPC but log is inconsistent, return false\n", rf.me)
+		// set reason for leader to fast backup
+		if len(rf.log) <= args.PrevLogIndex {
+			reply.XTerm = -1
+			reply.XLen = len(rf.log)
+		} else {
+			reply.XTerm = rf.log[args.PrevLogIndex].Term
+			idx := args.PrevLogIndex
+			for ; rf.log[idx].Term == reply.XTerm; idx-- {
+			}
+			reply.XIndex = idx + 1
+		}
 		return
 	}
 	reply.Success = true
@@ -446,7 +461,28 @@ func (rf *Raft) sendAppendEntry(term int, server int) {
 		return
 	}
 	if !reply.Success {
-		rf.nextIndex[server]--
+		//rf.nextIndex[server]--
+		if reply.XTerm == -1 {
+			rf.nextIndex[server] = reply.XLen
+		} else {
+			// check for leader have XTerm
+			DPrintf("server %v is a leader, getting appendentry reply from %v, reply fail, check for XTerm, log:%v\n", rf.me, server, len(entry))
+			//rf.nextIndex[server]--
+			// minus one case for no log, even have log, it will not affect result because follower reply fail
+			idx := rf.nextIndex[server] - 1
+			for ; idx > 0 && rf.log[idx].Term >= reply.XTerm; idx-- {
+				if rf.log[idx].Term == reply.XTerm {
+					break
+				}
+			}
+			if rf.log[idx].Term == reply.XTerm {
+				// the first entry has this term
+				//rf.nextIndex[server]--
+				rf.nextIndex[server] = idx + 1
+			} else {
+				rf.nextIndex[server] = reply.XIndex
+			}
+		}
 		DPrintf("server %v is a leader, getting heartbeat reply from %v, get inconsistent flag\n", rf.me, server)
 	} else {
 		DPrintf("server %v is a leader, getting heartbeat reply from %v, update server log info\n", rf.me, server)
