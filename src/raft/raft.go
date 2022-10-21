@@ -461,28 +461,28 @@ func (rf *Raft) sendAppendEntry(term int, server int) {
 		return
 	}
 	if !reply.Success {
-		//rf.nextIndex[server]--
-		if reply.XTerm == -1 {
-			rf.nextIndex[server] = reply.XLen
-		} else {
-			// check for leader have XTerm
-			DPrintf("server %v is a leader, getting appendentry reply from %v, reply fail, check for XTerm, log:%v\n", rf.me, server, len(entry))
-			//rf.nextIndex[server]--
-			// minus one case for no log, even have log, it will not affect result because follower reply fail
-			idx := rf.nextIndex[server] - 1
-			for ; idx > 0 && rf.log[idx].Term >= reply.XTerm; idx-- {
-				if rf.log[idx].Term == reply.XTerm {
-					break
-				}
-			}
-			if rf.log[idx].Term == reply.XTerm {
-				// the first entry has this term
-				//rf.nextIndex[server]--
-				rf.nextIndex[server] = idx + 1
-			} else {
-				rf.nextIndex[server] = reply.XIndex
-			}
-		}
+		rf.nextIndex[server]--
+		//if reply.XTerm == -1 {
+		//	rf.nextIndex[server] = reply.XLen
+		//} else {
+		//	// check for leader have XTerm
+		//	DPrintf("server %v is a leader, getting appendentry reply from %v, reply fail, check for XTerm, log:%v\n", rf.me, server, len(entry))
+		//	//rf.nextIndex[server]--
+		//	// minus one case for no log, even have log, it will not affect result because follower reply fail
+		//	idx := rf.nextIndex[server] - 1
+		//	for ; idx > 0 && rf.log[idx].Term >= reply.XTerm; idx-- {
+		//		if rf.log[idx].Term == reply.XTerm {
+		//			break
+		//		}
+		//	}
+		//	if rf.log[idx].Term == reply.XTerm {
+		//		// the first entry has this term
+		//		//rf.nextIndex[server] = idx + 1
+		//		rf.nextIndex[server]--
+		//	} else {
+		//		rf.nextIndex[server] = reply.XIndex
+		//	}
+		//}
 		DPrintf("server %v is a leader, getting heartbeat reply from %v, get inconsistent flag\n", rf.me, server)
 	} else {
 		DPrintf("server %v is a leader, getting heartbeat reply from %v, update server log info\n", rf.me, server)
@@ -618,38 +618,6 @@ func (rf *Raft) toFollower(term int) {
 	rf.votedFor = -1
 }
 
-// HeartBeat
-// a go routine to periodically send heartbeat
-//
-func (rf *Raft) HeartBeat(term int, server int) {
-	// rf.me is read only
-	//DPrintf("server %v is a leader, sending heartbeat to %v\n", rf.me, server)
-	args := AppendEntryArgs{Term: term, LeaderId: rf.me}
-	reply := AppendEntryReply{}
-	ok := rf.peers[server].Call("Raft.AppendEntry", &args, &reply)
-	if !ok {
-		//DPrintf("raft.go::sendHeartBeat() send append entry fail\n")
-		return
-	}
-	DPrintf("server %v is a leader, getting heartbeat reply from %v\n", rf.me, server)
-	rf.grabLock()
-	defer rf.releaseLock()
-	// no need this, when term changed, leader must be follower
-	//if rf.currTerm != term {
-	//	DPrintf("server %v is a leader, getting heartbeat reply from %v, its term has been changed\n", rf.me, server)
-	//	return
-	//}
-	// guard for case, do we need this?
-	if rf.state != 2 {
-		DPrintf("server %v is a leader, getting heartbeat reply from %v, but is not a leader now\n", rf.me, server)
-		return
-	}
-	if rf.currTerm < reply.Term {
-		DPrintf("server %v is a leader, getting heartbeat reply from %v, the reply has a higher term, turn into follower\n", rf.me, server)
-		rf.toFollower(reply.Term)
-	}
-}
-
 // when call this function, must hold rf.mu unless the first initialize
 func (rf *Raft) freshReceiveTime() {
 	rf.lastReceiveTime = time.Now()
@@ -719,6 +687,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// -1 means none
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 1)
+	// insert random data
+	//rf.log[0].Term = -10
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.state = 0
