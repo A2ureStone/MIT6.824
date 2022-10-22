@@ -69,10 +69,8 @@ type AppendEntryArgs struct {
 }
 
 type AppendEntryReply struct {
-	Term         int  // current term for follower, for leader to update itself
-	Success      bool // true if follower contained entry matching prevLogIndex and prevLogTerm
-	PrevLogIndex int  // index of log entry immediately preceding
-	PrevLogTerm  int  // term of prevLogIndex entry
+	Term    int  // current term for follower, for leader to update itself
+	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
 }
 
 //
@@ -276,8 +274,6 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	defer rf.releaseLock()
 	reply.Term = rf.currTerm
 	reply.Success = false
-	reply.PrevLogIndex = args.PrevLogIndex
-	reply.PrevLogTerm = args.PrevLogTerm
 	DebugPrintf(dLog2, "S%v(T%v) <- S%v(T%v), Receive AppendEntry", rf.me, rf.currTerm, args.LeaderId, args.Term, len(args.Entries))
 	if rf.currTerm < args.Term {
 		// convert to follower
@@ -443,10 +439,10 @@ func (rf *Raft) sendAppendEntry(term int, server int) {
 		//DPrintf("server %v send AppendEntry failed\n", server)
 		return
 	}
-	// case for rpc reorder
-	if reply.PrevLogTerm != args.PrevLogTerm && reply.PrevLogIndex != args.PrevLogIndex {
-		return
-	}
+	//// case for rpc reorder
+	//if reply.PrevLogTerm != args.PrevLogTerm && reply.PrevLogIndex != args.PrevLogIndex {
+	//	return
+	//}
 	rf.grabLock()
 	defer rf.releaseLock()
 	if rf.state != 2 {
@@ -462,10 +458,11 @@ func (rf *Raft) sendAppendEntry(term int, server int) {
 		rf.nextIndex[server]--
 		DebugPrintf(dLog, "S%v(T%v) <- S%v(T%v), Reply False For Log Inconsistency", rf.me, rf.currTerm, server, reply.Term)
 	} else {
-		DebugPrintf(dLog, "S%v(T%v) <- S%v(T%v), NextIndex: %v to %v MatchIndex: %v to %v", rf.me, rf.currTerm, server, reply.Term, rf.nextIndex[server], len(rf.log), rf.matchIndex[server], len(rf.log)-1)
-		rf.nextIndex[server] = len(rf.log)
+		end := pre_idx + len(entry) + 1
+		DebugPrintf(dLog, "S%v(T%v) <- S%v(T%v), NextIndex: %v to %v MatchIndex: %v to %v", rf.me, rf.currTerm, server, reply.Term, rf.nextIndex[server], end, rf.matchIndex[server], end-1)
+		rf.nextIndex[server] = end
 		// log matching property
-		rf.matchIndex[server] = len(rf.log) - 1
+		rf.matchIndex[server] = end - 1
 		// a majority match
 		rf.matchIndex[rf.me] = len(rf.log) - 1
 		sort_lst := make([]int, len(rf.peers))
