@@ -69,8 +69,10 @@ type AppendEntryArgs struct {
 }
 
 type AppendEntryReply struct {
-	Term    int  // current term for follower, for leader to update itself
-	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+	Term         int  // current term for follower, for leader to update itself
+	Success      bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+	PrevLogIndex int  // index of log entry immediately preceding
+	PrevLogTerm  int  // term of prevLogIndex entry
 }
 
 //
@@ -233,33 +235,35 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// in leader state, may receive a request vote
 	rf.grabLock()
 	defer rf.releaseLock()
-	DPrintf("server %v receive RequestVote RPC\n", rf.me)
-	// reset receive time for RequestVote RPC
-	rf.freshReceiveTime()
-	reply.Term = rf.currTerm
 	reply.VoteGranted = false
+	reply.Term = rf.currTerm
 	if args.Term < rf.currTerm {
-		//DPrintf("server %v receive request vote which term less than itself, return false\n", rf.me)
+		DebugPrintf(dVote, "S%v(T%v) Ignore RequestVote From S%v(T%v)", rf.me, rf.currTerm, args.CandidateId, args.Term)
 		return
 	} else if rf.currTerm < args.Term {
-		//DPrintf("server %v receive request vote which term larger than itself, turn into follower\n", rf.me)
+		DebugPrintf(dVote, "S%v(T%v) Receive RequestVote From S%v(T%v), Term Changed", rf.me, rf.currTerm, args.CandidateId, args.Term)
 		rf.toFollower(args.Term)
+		reply.Term = args.Term
 	}
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+
 		last_idx := len(rf.log) - 1
 		last_log_term := rf.log[last_idx].Term
+		DebugPrintf(dVote, "S%v(T%v) Voting to S%v(at T%v), [%v %v] - [%v %v]", rf.me, rf.currTerm, args.CandidateId, args.Term, last_idx, last_log_term, args.LastLogIndex, args.LastLogTerm)
 		if last_log_term == args.LastLogTerm && last_idx > args.LastLogIndex {
-			DPrintf("server %v receive request vote, reject for same-term log index inconsistency\n", rf.me)
+			//DPrintf("server %v receive request vote, reject for same-term log index inconsistency\n", rf.me)
 			return
 		}
 		if last_log_term > args.LastLogTerm {
-			DPrintf("server %v receive request vote, reject for my log term %v, receive log term %v\n", rf.me, last_log_term, args.LastLogIndex)
+			//DPrintf("server %v receive request vote, reject for my log term %v, receive log term %v\n", rf.me, last_log_term, args.LastLogIndex)
 			return
 		}
+		// reset receive time for RequestVote RPC
+		rf.freshReceiveTime()
 		// need change in later lab
-		DPrintf("server %v receive request vote, vote for %v\n", rf.me, args.CandidateId)
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
+		DebugPrintf(dVote, "S%v(T%v) Granting Vote to S%v(at T%v)", rf.me, rf.currTerm, args.CandidateId, args.Term)
 	}
 }
 
@@ -270,41 +274,44 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	// for now, only to reset timeout
 	rf.grabLock()
 	defer rf.releaseLock()
-	DPrintf("server %v receive AppendEntry RPC\n", rf.me)
-	// reset receive time for AppendEntry RPC
-	rf.freshReceiveTime()
 	reply.Term = rf.currTerm
 	reply.Success = false
+	reply.PrevLogIndex = args.PrevLogIndex
+	reply.PrevLogTerm = args.PrevLogTerm
+	DebugPrintf(dLog2, "S%v(T%v) <- S%v(T%v), Receive AppendEntry", rf.me, rf.currTerm, args.LeaderId, args.Term, len(args.Entries))
 	if rf.currTerm < args.Term {
 		// convert to follower
-		DPrintf("server %v receive AppendEntry RPC which term %v greater than itself %v, and turn into follower\n", rf.me, args.Term, rf.currTerm)
+		DebugPrintf(dLog2, "S%v(T%v) <- S%v(T%v), Changed Term", rf.me, rf.currTerm, args.LeaderId, args.Term)
 		rf.toFollower(args.Term)
 	} else if args.Term < rf.currTerm {
-		DPrintf("server %v receive AppendEntry RPC which term %v less than itself %v, return false\n", rf.me, args.Term, rf.currTerm)
+		DebugPrintf(dLog2, "S%v(T%v) <- S%v(T%v), False For Higher Term", rf.me, rf.currTerm, args.LeaderId, args.Term)
 		// return false
 		return
 	}
 	// check for candidate, receive AppendEntry RPC from leader
-	// even for candidate change to follower, it can still reply this appendentry
+	// even for candidate change to follower, it can still reply this append entry
 	if rf.state == 1 {
-		DPrintf("server %v receive AppendEntry RPC from another leader, turn into follower\n", rf.me)
+		DebugPrintf(dLog2, "S%v(T%v) <- S%v(T%v), Changed To Follower From Candidate", rf.me, rf.currTerm, args.LeaderId, args.Term)
 		// here is the term correctly??
 		rf.toFollower(args.Term)
 	}
+	// reset receive time for AppendEntry RPC
+	rf.freshReceiveTime()
 	if len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		// here we will return false
-		DPrintf("server %v receive AppendEntry RPC but log is inconsistent, return false\n", rf.me)
+		DebugPrintf(dLog2, "S%v(T%v) <- S%v(T%v), False For Log Inconsistence", rf.me, rf.currTerm, args.LeaderId, args.Term)
 		return
 	}
 	reply.Success = true
 	rf.log = rf.log[:args.PrevLogIndex+1]
 	rf.log = append(rf.log, args.Entries...)
+	DebugPrintf(dLog2, "S%v(T%v) <- S%v(T%v), Append Log Len: %v", rf.me, rf.currTerm, args.LeaderId, args.Term, len(args.Entries))
 	//DPrintf("server %v receive AppendEntry RPC , check log %v\n", rf.me, rf.log)
-	if len(args.Entries) > 0 {
-		DPrintf("server %v receive AppendEntry RPC , append entry to log\n", rf.me)
-	}
-	DPrintf("server %v receive AppendEntry RPC , leader commit %v\n", rf.me, args.LeaderCommit)
-	DPrintf("server %v receive AppendEntry RPC , my commit %v\n", rf.me, rf.commitIndex)
+	//if len(args.Entries) > 0 {
+	//	DPrintf("server %v receive AppendEntry RPC , append entry to log\n", rf.me)
+	//}
+	//DPrintf("server %v receive AppendEntry RPC , leader commit %v\n", rf.me, args.LeaderCommit)
+	//DPrintf("server %v receive AppendEntry RPC , my commit %v\n", rf.me, rf.commitIndex)
 	if args.LeaderCommit > rf.commitIndex {
 		og_idx := rf.commitIndex + 1
 		rf.commitIndex = len(rf.log) - 1
@@ -312,10 +319,10 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 			rf.commitIndex = args.LeaderCommit
 		}
 		for idx := og_idx; idx <= rf.commitIndex; idx++ {
-			DPrintf("server %v send msg to channel\n", rf.me)
+			//DPrintf("server %v send msg to channel\n", rf.me)
 			rf.testMsg <- ApplyMsg{CommandValid: true, CommandIndex: idx, Command: rf.log[idx].Command}
 		}
-		DPrintf("server %v receive AppendEntry RPC , commit %v\n", rf.me, rf.commitIndex)
+		DebugPrintf(dCommit, "S%v(T%v) <- S%v(T%v), Commit to %v", rf.me, rf.currTerm, args.LeaderId, args.Term, rf.commitIndex)
 		rf.updateLastApplied.Broadcast()
 	}
 }
@@ -357,7 +364,7 @@ func (rf *Raft) sendRequestVote(term int, server int) {
 	rf.grabLock()
 	if rf.state != 1 {
 		// not candidate
-		DPrintf("server %v sending request vote RPC to %v, but canceled because of state turn into:%v\n", rf.me, server, rf.state)
+		//DPrintf("server %v sending request vote RPC to %v, but canceled because of state turn into:%v\n", rf.me, server, rf.state)
 		rf.releaseLock()
 		return
 	}
@@ -373,23 +380,22 @@ func (rf *Raft) sendRequestVote(term int, server int) {
 		//DPrintf("raft.go::ticker() send request vote to %v fail\n", server)
 		return
 	}
-	DPrintf("server %v return from RPC to %v, receive reply\n", rf.me, server)
 
 	rf.grabLock()
 	defer rf.releaseLock()
 	// case for time-out again
 	if rf.currTerm != term {
-		DPrintf("server %v return from RPC but its term changed\n", server)
+		DebugPrintf(dVote, "S%v(T%v) <- S%v(T%v), Itself Term Changed", rf.me, rf.currTerm, server, reply.Term)
 		return
 	}
 	// case for converting to a follower or being a leader
 	if rf.state != 1 {
-		DPrintf("server %v sending request vote RPC to %v, receive reply, but state changed to %v\n", rf.me, server, rf.state)
+		DebugPrintf(dVote, "S%v(T%v) <- S%v(T%v), Is Not Candidate", rf.me, rf.currTerm, server, reply.Term)
 		return
 	}
 	// check for reply term
 	if rf.currTerm < reply.Term {
-		DPrintf("server %v sending request vote RPC to %v, receive a reply which term greater than itself\n", rf.me, server)
+		DebugPrintf(dVote, "S%v(T%v) <- S%v(T%v), Changed To Higher Term", rf.me, rf.currTerm, server, reply.Term)
 		rf.toFollower(reply.Term)
 		return
 	}
@@ -397,14 +403,14 @@ func (rf *Raft) sendRequestVote(term int, server int) {
 	// do nothing, if already get majority votes
 	if reply.VoteGranted {
 		rf.voteNums++
-		DPrintf("server %v sending request vote RPC to %v, receive a reply which vote granted\n", rf.me, server)
+		DebugPrintf(dVote, "S%v(T%v) <- S%v(T%v), Got Vote", rf.me, rf.currTerm, server, reply.Term)
 	}
 	majority := len(rf.peers) / 2
 	if len(rf.peers)%2 != 0 {
 		majority++
 	}
 	if rf.voteNums >= majority { // become leader
-		DPrintf("server %v sending request vote RPC, become a leader\n", rf.me)
+		DebugPrintf(dVote, "S%v(T%v) <- S%v(T%v), Change To Leader", rf.me, rf.currTerm, server, reply.Term)
 		rf.state = 2
 		// fire a go routine to send heartbeat
 		rf.lastSendTime = time.Now()
@@ -428,46 +434,52 @@ func (rf *Raft) sendAppendEntry(term int, server int) {
 	args := AppendEntryArgs{Term: term, LeaderId: rf.me, PrevLogIndex: pre_idx, PrevLogTerm: rf.log[pre_idx].Term,
 		Entries: entry, LeaderCommit: rf.commitIndex}
 	reply := AppendEntryReply{}
+	//DebugPrintf(dLog, "S%v(T%v) -> S%v, Sending PLI: %v PLT: %v N: %v LC: %v - %v", rf.me, rf.currTerm, server, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries), args.LeaderCommit, args.Entries)
+	// here use term not currTerm is more readable
+	DebugPrintf(dLog, "S%v(T%v) -> S%v, Sending PLI: %v PLT: %v N: %v LC: %v - [%v to %v)", rf.me, rf.currTerm, server, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries), args.LeaderCommit, pre_idx+1, len(rf.log))
 	rf.releaseLock()
 	ok := rf.peers[server].Call("Raft.AppendEntry", &args, &reply)
 	if !ok {
 		//DPrintf("server %v send AppendEntry failed\n", server)
 		return
 	}
+	// case for rpc reorder
+	if reply.PrevLogTerm != args.PrevLogTerm && reply.PrevLogIndex != args.PrevLogIndex {
+		return
+	}
 	rf.grabLock()
 	defer rf.releaseLock()
 	if rf.state != 2 {
-		DPrintf("server %v is a leader, getting heartbeat reply from %v, but is not a leader now\n", rf.me, server)
+		DebugPrintf(dLog, "S%v(T%v) <- S%v(T%v), Not A Leader", rf.me, rf.currTerm, server, reply.Term)
 		return
 	}
 	if rf.currTerm < reply.Term {
-		DPrintf("server %v is a leader, getting heartbeat reply from %v, the reply has a higher term, turn into follower\n", rf.me, server)
+		DebugPrintf(dLog, "S%v(T%v) <- S%v(T%v), Change To Higher Term", rf.me, rf.currTerm, server, reply.Term)
 		rf.toFollower(reply.Term)
 		return
 	}
 	if !reply.Success {
 		rf.nextIndex[server]--
-		DPrintf("server %v is a leader, getting heartbeat reply from %v, get inconsistent flag\n", rf.me, server)
+		DebugPrintf(dLog, "S%v(T%v) <- S%v(T%v), Reply False For Log Inconsistency", rf.me, rf.currTerm, server, reply.Term)
 	} else {
-		DPrintf("server %v is a leader, getting heartbeat reply from %v, update server log info\n", rf.me, server)
+		DebugPrintf(dLog, "S%v(T%v) <- S%v(T%v), NextIndex: %v to %v MatchIndex: %v to %v", rf.me, rf.currTerm, server, reply.Term, rf.nextIndex[server], len(rf.log), rf.matchIndex[server], len(rf.log)-1)
 		rf.nextIndex[server] = len(rf.log)
 		// log matching property
 		rf.matchIndex[server] = len(rf.log) - 1
-		DPrintf("server %v is a leader, getting heartbeat reply from %v, check matchIdx %v\n", rf.me, server, rf.matchIndex)
 		// a majority match
 		rf.matchIndex[rf.me] = len(rf.log) - 1
 		sort_lst := make([]int, len(rf.peers))
 		copy(sort_lst, rf.matchIndex)
 		sort.Ints(sort_lst)
-		min_match := sort_lst[len(rf.peers)/2]
-		DPrintf("server %v is a leader, getting heartbeat reply from %v, min_match: %v\n", rf.me, server, min_match)
+		majority := len(rf.peers) / 2
+		// here ok, because rf.peers is odd
+		min_match := sort_lst[majority]
 		// only commit current term in case for duplicate commit
 		if min_match > rf.commitIndex && rf.log[min_match].Term == rf.currTerm {
-			DPrintf("server %v is a leader, getting heartbeat reply from %v, commit %v\n", rf.me, server, min_match)
+			DebugPrintf(dCommit, "S%v(T%v) <- S%v(T%v), Commit To %v", rf.me, rf.currTerm, server, reply.Term, min_match)
 			og_idx := rf.commitIndex + 1
 			rf.commitIndex = min_match
 			for idx := og_idx; idx <= rf.commitIndex; idx++ {
-				DPrintf("server %v send msg to channel\n", rf.me)
 				rf.testMsg <- ApplyMsg{CommandValid: true, CommandIndex: idx, Command: rf.log[idx].Command}
 			}
 		}
@@ -495,10 +507,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.state != 2 {
 		return -1, -1, false
 	}
-	DPrintf("server %v is a leader, receive a command\n", rf.me)
 	rf.log = append(rf.log, LogEntry{command, rf.currTerm})
 	//DPrintf("server %v is a leader, check log %v\n", rf.me, rf.log)
-	DPrintf("server %v is a leader, append entry at index %v\n", rf.me, len(rf.log)-1)
+	DebugPrintf(dLeader, "S%v(T%v) Receive Client Command %v", rf.me, rf.currTerm, command)
 
 	return len(rf.log) - 1, rf.currTerm, true
 }
@@ -537,7 +548,7 @@ func (rf *Raft) ticker() {
 		rf.grabLock()
 		if rf.state != 2 {
 			if time.Now().Sub(rf.lastReceiveTime) >= rf.electionTimeout {
-				DPrintf("server %v election timeout, turn into candidate\n", rf.me)
+				DebugPrintf(dTimer, "S%v(T%v) ELT, To Candidate", rf.me, rf.currTerm)
 				// start election, convert to candidate
 
 				rf.currTerm++
@@ -582,38 +593,6 @@ func (rf *Raft) toFollower(term int) {
 	rf.votedFor = -1
 }
 
-// HeartBeat
-// a go routine to periodically send heartbeat
-//
-func (rf *Raft) HeartBeat(term int, server int) {
-	// rf.me is read only
-	//DPrintf("server %v is a leader, sending heartbeat to %v\n", rf.me, server)
-	args := AppendEntryArgs{Term: term, LeaderId: rf.me}
-	reply := AppendEntryReply{}
-	ok := rf.peers[server].Call("Raft.AppendEntry", &args, &reply)
-	if !ok {
-		//DPrintf("raft.go::sendHeartBeat() send append entry fail\n")
-		return
-	}
-	DPrintf("server %v is a leader, getting heartbeat reply from %v\n", rf.me, server)
-	rf.grabLock()
-	defer rf.releaseLock()
-	// no need this, when term changed, leader must be follower
-	//if rf.currTerm != term {
-	//	DPrintf("server %v is a leader, getting heartbeat reply from %v, its term has been changed\n", rf.me, server)
-	//	return
-	//}
-	// guard for case, do we need this?
-	if rf.state != 2 {
-		DPrintf("server %v is a leader, getting heartbeat reply from %v, but is not a leader now\n", rf.me, server)
-		return
-	}
-	if rf.currTerm < reply.Term {
-		DPrintf("server %v is a leader, getting heartbeat reply from %v, the reply has a higher term, turn into follower\n", rf.me, server)
-		rf.toFollower(reply.Term)
-	}
-}
-
 // when call this function, must hold rf.mu unless the first initialize
 func (rf *Raft) freshReceiveTime() {
 	rf.lastReceiveTime = time.Now()
@@ -627,7 +606,7 @@ func (rf *Raft) sendHeartBeat() {
 		rf.grabLock()
 		if rf.state == 2 {
 			if (time.Now().Sub(rf.lastSendTime)) >= rf.heartbeatTimeout {
-				DPrintf("server %v is a leader and trigger heartbeat timeout\n", rf.me)
+				DebugPrintf(dTimer, "S%v(T%v) Leader Trigger HeartBeat Timeout", rf.me, rf.currTerm)
 				term := rf.currTerm
 				rf.releaseLock()
 				for idx, _ := range rf.peers {
@@ -656,7 +635,7 @@ func (rf *Raft) applyEntry() {
 			rf.updateLastApplied.Wait()
 		}
 		// single update, nowhere to apply entry
-		DPrintf("server %v apply entry %v\n", rf.me, rf.commitIndex)
+		//DPrintf("server %v apply entry %v\n", rf.me, rf.commitIndex)
 		rf.lastApplied = rf.commitIndex
 		rf.releaseLock()
 	}
