@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"6.824/labgob"
+	"bytes"
 	//"crypto/rand"
 	"math/rand"
 	"sort"
@@ -140,12 +142,15 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(rf.currTerm) != nil ||
+		e.Encode(rf.votedFor) != nil ||
+		e.Encode(rf.log) != nil {
+		DebugPrintf(dPersist, "Encode Fail")
+	}
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -157,17 +162,20 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var term int
+	var voteFor int
+	var log []LogEntry
+	if d.Decode(&term) != nil ||
+		d.Decode(&voteFor) != nil ||
+		d.Decode(&log) != nil {
+		DebugPrintf(dPersist, "Decode Fail")
+	} else {
+		rf.currTerm = term
+		rf.votedFor = voteFor
+		rf.log = log
+	}
 }
 
 //
@@ -265,6 +273,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// need change in later lab
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
+		rf.persist()
 		DebugPrintf(dVote, "S%v(T%v) Granting Vote to S%v(at T%v)", rf.me, rf.currTerm, args.CandidateId, args.Term)
 	}
 }
@@ -316,6 +325,9 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	reply.Success = true
 	rf.log = rf.log[:args.PrevLogIndex+1]
 	rf.log = append(rf.log, args.Entries...)
+	if len(args.Entries) > 0 {
+		rf.persist()
+	}
 	DebugPrintf(dLog2, "S%v(T%v) <- S%v(T%v), Append Log Len: %v", rf.me, rf.currTerm, args.LeaderId, args.Term, len(args.Entries))
 	//DPrintf("server %v receive AppendEntry RPC , check log %v\n", rf.me, rf.log)
 	//if len(args.Entries) > 0 {
@@ -470,29 +482,28 @@ func (rf *Raft) sendAppendEntry(term int, server int) {
 		return
 	}
 	if !reply.Success {
-		rf.nextIndex[server]--
-		//if reply.XTerm == -1 {
-		//	rf.nextIndex[server] = reply.XLen
-		//} else {
-		//	// check for leader have XTerm
-		//	DPrintf("server %v is a leader, getting appendentry reply from %v, reply fail, check for XTerm, log:%v\n", rf.me, server, len(entry))
-		//	//rf.nextIndex[server]--
-		//	// minus one case for no log, even have log, it will not affect result because follower reply fail
-		//	idx := rf.nextIndex[server] - 1
-		//	for ; idx > 0 && rf.log[idx].Term >= reply.XTerm; idx-- {
-		//		if rf.log[idx].Term == reply.XTerm {
-		//			break
-		//		}
-		//	}
-		//	if rf.log[idx].Term == reply.XTerm {
-		//		// the first entry has this term
-		//		//rf.nextIndex[server] = idx + 1
-		//		rf.nextIndex[server]--
-		//	} else {
-		//		rf.nextIndex[server] = reply.XIndex
-		//	}
-		//}
-		DPrintf("server %v is a leader, getting heartbeat reply from %v, get inconsistent flag\n", rf.me, server)
+		//rf.nextIndex[server]--
+		if reply.XTerm == -1 {
+			rf.nextIndex[server] = reply.XLen
+		} else {
+			// check for leader have XTerm
+			//DebugPrintf("server %v is a leader, getting appendentry reply from %v, reply fail, check for XTerm, log:%v\n", rf.me, server, len(entry))
+			//rf.nextIndex[server]--
+			// minus one case for no log, even have log, it will not affect result because follower reply fail
+			idx := rf.nextIndex[server] - 1
+			for ; idx > 0 && rf.log[idx].Term >= reply.XTerm; idx-- {
+				if rf.log[idx].Term == reply.XTerm {
+					break
+				}
+			}
+			if rf.log[idx].Term == reply.XTerm {
+				// the first entry has this term
+				rf.nextIndex[server] = idx + 1
+				//rf.nextIndex[server]--
+			} else {
+				rf.nextIndex[server] = reply.XIndex
+			}
+		}
 		DebugPrintf(dLog, "S%v(T%v) <- S%v(T%v), Reply False For Log Inconsistency", rf.me, rf.currTerm, server, reply.Term)
 	} else {
 		end := pre_idx + len(entry) + 1
@@ -542,6 +553,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 	rf.log = append(rf.log, LogEntry{command, rf.currTerm})
+	rf.persist()
 	//DPrintf("server %v is a leader, check log %v\n", rf.me, rf.log)
 	DebugPrintf(dLeader, "S%v(T%v) Receive Client Command %v", rf.me, rf.currTerm, command)
 
@@ -588,6 +600,7 @@ func (rf *Raft) ticker() {
 				rf.currTerm++
 				rf.state = 1
 				rf.votedFor = rf.me
+				rf.persist()
 				rf.resetTimer()
 				rf.voteNums++
 
@@ -625,6 +638,7 @@ func (rf *Raft) toFollower(term int) {
 	rf.currTerm = term
 	rf.state = 0
 	rf.votedFor = -1
+	rf.persist()
 }
 
 // when call this function, must hold rf.mu unless the first initialize
