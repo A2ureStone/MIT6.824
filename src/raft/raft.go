@@ -323,18 +323,28 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		return
 	}
 	reply.Success = true
-	rf.log = rf.log[:args.PrevLogIndex+1]
-	rf.log = append(rf.log, args.Entries...)
 	if len(args.Entries) > 0 {
-		rf.persist()
+		end := len(rf.log) - 1
+		if args.PrevLogIndex+len(args.Entries) < end {
+			end = args.PrevLogIndex + len(args.Entries)
+		}
+		check_match := args.PrevLogIndex + 1
+		for ; check_match <= end; check_match++ {
+			arg_idx := check_match - args.PrevLogIndex - 1
+			if rf.log[check_match].Term != args.Entries[arg_idx].Term {
+				rf.log = rf.log[:check_match]
+				break
+			}
+		}
+		remain_off := check_match - args.PrevLogIndex - 1
+		rf.log = append(rf.log, args.Entries[remain_off:]...)
+		// when truncate, remain_of must > 0
+		DebugPrintf(dLog2, "S%v(T%v) <- S%v(T%v), Append Log Len: %v", rf.me, rf.currTerm, args.LeaderId, args.Term, len(args.Entries)-remain_off)
+		if len(rf.log)-remain_off > 0 {
+			rf.persist()
+		}
 	}
-	DebugPrintf(dLog2, "S%v(T%v) <- S%v(T%v), Append Log Len: %v", rf.me, rf.currTerm, args.LeaderId, args.Term, len(args.Entries))
-	//DPrintf("server %v receive AppendEntry RPC , check log %v\n", rf.me, rf.log)
-	//if len(args.Entries) > 0 {
-	//	DPrintf("server %v receive AppendEntry RPC , append entry to log\n", rf.me)
-	//}
-	//DPrintf("server %v receive AppendEntry RPC , leader commit %v\n", rf.me, args.LeaderCommit)
-	//DPrintf("server %v receive AppendEntry RPC , my commit %v\n", rf.me, rf.commitIndex)
+
 	if args.LeaderCommit > rf.commitIndex {
 		og_idx := rf.commitIndex + 1
 		rf.commitIndex = len(rf.log) - 1
@@ -421,6 +431,9 @@ func (rf *Raft) sendRequestVote(term int, server int) {
 		DebugPrintf(dVote, "S%v(T%v) <- S%v(T%v), Changed To Higher Term", rf.me, rf.currTerm, server, reply.Term)
 		rf.toFollower(reply.Term)
 		return
+	} else if rf.currTerm > reply.Term {
+		// case for receive response from previous
+		return
 	}
 
 	// do nothing, if already get majority votes
@@ -450,6 +463,11 @@ func (rf *Raft) sendRequestVote(term int, server int) {
 
 func (rf *Raft) sendAppendEntry(term int, server int) {
 	rf.grabLock()
+	if rf.state != 2 {
+		// not a leader again
+		rf.releaseLock()
+		return
+	}
 	pre_idx := rf.nextIndex[server] - 1
 	entry := make([]LogEntry, 0)
 	// if we have something to send, go and send it
@@ -472,6 +490,11 @@ func (rf *Raft) sendAppendEntry(term int, server int) {
 	//}
 	rf.grabLock()
 	defer rf.releaseLock()
+	// here if term changed, we are no longer a leader
+	if rf.currTerm != term {
+		//DebugPrintf(dVote, "S%v(T%v) <- S%v(T%v), Itself Term Changed", rf.me, rf.currTerm, server, reply.Term)
+		return
+	}
 	if rf.state != 2 {
 		DebugPrintf(dLog, "S%v(T%v) <- S%v(T%v), Not A Leader", rf.me, rf.currTerm, server, reply.Term)
 		return
@@ -479,6 +502,8 @@ func (rf *Raft) sendAppendEntry(term int, server int) {
 	if rf.currTerm < reply.Term {
 		DebugPrintf(dLog, "S%v(T%v) <- S%v(T%v), Change To Higher Term", rf.me, rf.currTerm, server, reply.Term)
 		rf.toFollower(reply.Term)
+		return
+	} else if rf.currTerm > reply.Term {
 		return
 	}
 	if !reply.Success {
@@ -507,10 +532,16 @@ func (rf *Raft) sendAppendEntry(term int, server int) {
 		DebugPrintf(dLog, "S%v(T%v) <- S%v(T%v), Reply False For Log Inconsistency", rf.me, rf.currTerm, server, reply.Term)
 	} else {
 		end := pre_idx + len(entry) + 1
-		DebugPrintf(dLog, "S%v(T%v) <- S%v(T%v), NextIndex: %v to %v MatchIndex: %v to %v", rf.me, rf.currTerm, server, reply.Term, rf.nextIndex[server], end, rf.matchIndex[server], end-1)
-		rf.nextIndex[server] = end
+		// update only new
+		if end > rf.nextIndex[server] {
+			DebugPrintf(dLog, "S%v(T%v) <- S%v(T%v), NextIndex: %v to %v", rf.me, rf.currTerm, server, reply.Term, rf.nextIndex[server], end)
+			rf.nextIndex[server] = end
+		}
+		if end-1 > rf.matchIndex[server] {
+			DebugPrintf(dLog, "S%v(T%v) <- S%v(T%v), MatchIndex: %v to %v", rf.me, rf.currTerm, server, reply.Term, rf.matchIndex[server], end-1)
+			rf.matchIndex[server] = end - 1
+		}
 		// log matching property
-		rf.matchIndex[server] = end - 1
 		// a majority match
 		rf.matchIndex[rf.me] = len(rf.log) - 1
 		sort_lst := make([]int, len(rf.peers))
