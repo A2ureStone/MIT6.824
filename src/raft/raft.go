@@ -79,6 +79,18 @@ type AppendEntryReply struct {
 	XLen   int // len of the follower log
 }
 
+type InstallSnapShotArgs struct {
+	Term              int    // leader's term
+	LeaderId          int    // follower use this to redirect clients
+	LastIncludedIndex int    // index of log entry immediately preceding
+	LastIncludedTerm  int    // term of prevLogIndex entry
+	Data              []byte // log entries to store(empty for heartbeat)
+}
+
+type InstallSnapShotReply struct {
+	Term int // reply term for update
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -119,6 +131,9 @@ type Raft struct {
 	// lab2b
 	updateLastApplied *sync.Cond // conditional variable for update lastApplied
 	testMsg           chan ApplyMsg
+
+	// lab2d
+	SnapshotIndex int // record index of snapshot last entry
 }
 
 // return currentTerm and whether this server
@@ -195,7 +210,22 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	// safely truncate log
+	rf.grabLock()
+	defer rf.releaseLock()
 
+	// do persist
+	rf.SnapshotIndex = index
+	rf.log = rf.log[index+1:]
+
+}
+
+func (rf *Raft) logSize() int {
+	return rf.SnapshotIndex + 1 + len(rf.log)
+}
+
+func (rf *Raft) logContent(index int) *LogEntry {
+	return &rf.log[index-rf.SnapshotIndex-1]
 }
 
 //
@@ -659,7 +689,7 @@ func (rf *Raft) ticker() {
 
 // when call this function, must hold rf.mu unless the first initialize
 func (rf *Raft) resetTimer() {
-	rf.electionTimeout = time.Duration(rand.Intn(200)+200) * time.Millisecond
+	rf.electionTimeout = time.Duration(rand.Intn(400)+200) * time.Millisecond
 	rf.lastReceiveTime = time.Now()
 	rf.voteNums = 0
 }
@@ -750,6 +780,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.heartbeatTimeout = time.Duration(125) * time.Millisecond
 	rf.updateLastApplied = sync.NewCond(&rf.mu)
 	rf.testMsg = applyCh
+	rf.SnapshotIndex = -1
 
 	// Your initialization code here (2A, 2B, 2C).
 
