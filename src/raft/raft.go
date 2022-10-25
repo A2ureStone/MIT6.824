@@ -667,6 +667,7 @@ func (rf *Raft) sendAppendEntry(term int, server int) {
 		if min_match > rf.commitIndex && rf.logContent(min_match).Term == rf.currTerm {
 			DebugPrintf(dCommit, "S%v(T%v) <- S%v(T%v), Commit To %v", rf.me, rf.currTerm, server, reply.Term, min_match)
 			rf.commitIndex = min_match
+			rf.updateLastApplied.Broadcast()
 			//og_idx := rf.commitIndex + 1
 			//for idx := og_idx; idx <= rf.commitIndex; idx++ {
 			//	DebugPrintf(dCommit, "S%v(T%v) Send Msg To Channel", rf.me, rf.currTerm)
