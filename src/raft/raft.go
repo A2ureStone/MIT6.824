@@ -225,6 +225,14 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	rf.grabLock()
 	defer rf.releaseLock()
 
+	// is an old snapshot
+	if lastIncludedIndex <= rf.SnapshotIndex {
+		DebugPrintf(dSnap, "S%v(T%v) Refuse Snapshot index%v(itself %v)", rf.me, rf.currTerm, lastIncludedIndex, rf.SnapshotIndex)
+		rf.applyTurnOn = true
+		rf.applyChange.Broadcast()
+		return false
+	}
+
 	// TODO discard log entry
 	// change volatile state
 	if lastIncludedIndex >= rf.logSize() || rf.logContent(lastIncludedIndex).Term != lastIncludedTerm {
@@ -255,6 +263,8 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 		e.Encode(rf.SnapshotIndex) != nil ||
 		e.Encode(rf.log) != nil {
 		DebugPrintf(dPersist, "Encode Fail")
+		rf.applyTurnOn = true
+		rf.applyChange.Broadcast()
 		return false
 	}
 	data := w.Bytes()
@@ -810,12 +820,12 @@ func (rf *Raft) ReceiveSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 		DebugPrintf(dSnap, "S%v(T%v) <- S%v(T%v), Change Term", rf.me, rf.currTerm, args.LeaderId, args.Term)
 		rf.toFollower(args.Term)
 	}
-	// is an old snapshot
-	if args.LastIncludedIndex <= rf.SnapshotIndex {
-		DebugPrintf(dSnap, "S%v(T%v) Refuse Snapshot index%v(itself %v)", rf.me, rf.currTerm, args.LastIncludedIndex, rf.SnapshotIndex)
-		rf.releaseLock()
-		return
-	}
+	//// is an old snapshot
+	//if args.LastIncludedIndex <= rf.SnapshotIndex {
+	//	DebugPrintf(dSnap, "S%v(T%v) Refuse Snapshot index%v(itself %v)", rf.me, rf.currTerm, args.LastIncludedIndex, rf.SnapshotIndex)
+	//	rf.releaseLock()
+	//	return
+	//}
 
 	// turn off channel
 	rf.applyTurnOn = false
