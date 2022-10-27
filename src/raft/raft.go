@@ -463,7 +463,25 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		}
 	} else {
 		// case for RPC reorder, we may end up with receiving a rpc whose PrevLogIndex in the snapshot
+		// truncate args entry because in commit entry, same index means same command
+		if rf.SnapshotIndex+1-args.PrevLogIndex-1 < len(args.Entries) {
+			args.Entries = args.Entries[rf.SnapshotIndex+1-args.PrevLogIndex-1:]
+			args.PrevLogIndex = rf.SnapshotIndex
+		} else {
+			// no need to append entry
+			reply.Success = true
+			if args.LeaderCommit > rf.commitIndex {
+				rf.commitIndex = rf.logSize() - 1
+				if rf.commitIndex > args.LeaderCommit {
+					rf.commitIndex = args.LeaderCommit
+				}
+				DebugPrintf(dCommit, "S%v(T%v) <- S%v(T%v), Commit to %v", rf.me, rf.currTerm, args.LeaderId, args.Term, rf.commitIndex)
+				rf.updateLastApplied.Broadcast()
+			}
+			return
+		}
 	}
+
 	// TODO may need truncate arg log for start in snapshot
 	// no need to truncate, because here PrevLogIndex must at least Snapshot Index
 	reply.Success = true
@@ -500,11 +518,6 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 			rf.commitIndex = args.LeaderCommit
 		}
 		DebugPrintf(dCommit, "S%v(T%v) <- S%v(T%v), Commit to %v", rf.me, rf.currTerm, args.LeaderId, args.Term, rf.commitIndex)
-		//og_idx := rf.commitIndex + 1
-		//for idx := og_idx; idx <= rf.commitIndex; idx++ {
-		//	DPrintf("server %v send msg to channel\n", rf.me)
-		//rf.testMsg <- ApplyMsg{CommandValid: true, CommandIndex: idx, Command: rf.log[idx].Command}
-		//}
 		rf.updateLastApplied.Broadcast()
 	}
 }
