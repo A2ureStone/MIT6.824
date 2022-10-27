@@ -133,8 +133,10 @@ type Raft struct {
 	testMsg           chan ApplyMsg
 
 	// lab2d
-	SnapshotIndex int // record index of snapshot last entry
-	SnapshotTerm  int // record term of snapshot last entry
+	SnapshotIndex int  // record index of snapshot last entry
+	SnapshotTerm  int  // record term of snapshot last entry
+	applyTurnOn   bool // use to turn off apply channel when snapshot
+	applyChange   *sync.Cond
 }
 
 // return currentTerm and whether this server
@@ -220,49 +222,48 @@ func (rf *Raft) readPersist(data []byte) {
 //
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 	// Your code here (2D).
+	rf.grabLock()
+	defer rf.releaseLock()
+
+	// TODO discard log entry
+	// change volatile state
+	if lastIncludedIndex >= rf.logSize() || rf.logContent(lastIncludedIndex).Term != lastIncludedTerm {
+		// discard the entire log
+		rf.log = make([]LogEntry, 0)
+		DebugPrintf(dSnap, "S%v(T%v) Discard Entire Log", rf.me, rf.currTerm)
+	} else {
+		rf.log = rf.log[lastIncludedIndex+1-rf.SnapshotIndex-1:]
+		DebugPrintf(dSnap, "S%v(T%v) Truncate Log", rf.me, rf.currTerm)
+	}
+	rf.SnapshotTerm = lastIncludedTerm
+	rf.SnapshotIndex = lastIncludedIndex
+	DebugPrintf(dSnap, "S%v(T%v) Snapshot At Index%v", rf.me, rf.currTerm, lastIncludedIndex)
+
+	// at least update commit index if necessary
+	if rf.commitIndex < lastIncludedIndex {
+		rf.commitIndex = lastIncludedIndex
+		DebugPrintf(dSnap, "S%v(T%v) Commit To %v For Snapshot", rf.me, rf.currTerm, rf.commitIndex)
+		rf.updateLastApplied.Broadcast()
+	}
+
+	// do persist
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(rf.currTerm) != nil ||
+		e.Encode(rf.votedFor) != nil ||
+		e.Encode(rf.SnapshotTerm) != nil ||
+		e.Encode(rf.SnapshotIndex) != nil ||
+		e.Encode(rf.log) != nil {
+		DebugPrintf(dPersist, "Encode Fail")
+		return false
+	}
+	data := w.Bytes()
+	rf.persister.SaveStateAndSnapshot(data, snapshot)
+
+	rf.applyTurnOn = true
+	rf.applyChange.Broadcast()
+
 	return true
-	//	rf.grabLock()
-	//	defer rf.releaseLock()
-	//
-	//	// is an old snapshot
-	//	if rf.SnapshotIndex >= lastIncludedIndex {
-	//		DebugPrintf(dSnap, "S%v(T%v) Refuse Snapshot index%v(itself %v)", rf.me, rf.currTerm, lastIncludedIndex, rf.SnapshotIndex)
-	//		return false
-	//	}
-	//
-	//
-	//	// change volatile state
-	//	if lastIncludedIndex >= rf.logSize() || rf.logContent(lastIncludedIndex).Term != lastIncludedTerm {
-	//		// discard the entire log
-	//		rf.log = make([]LogEntry, 0)
-	//		DebugPrintf(dSnap, "S%v(T%v) Discard Entire Log", rf.me)
-	//	} else {
-	//		rf.log = rf.log[lastIncludedIndex+1-rf.SnapshotIndex-1:]
-	//		DebugPrintf(dSnap, "S%v(T%v) Truncate Log", rf.me)
-	//	}
-	//	rf.SnapshotTerm = lastIncludedTerm
-	//	rf.SnapshotIndex = lastIncludedIndex
-	//	DebugPrintf(dSnap, "S%v(T%v) Snapshot At Index%v", rf.me, rf.currTerm, lastIncludedIndex)
-	//
-	//	// at least update commit index if necessary
-	//	if rf.commitIndex < lastIncludedIndex {
-	//		rf.commitIndex = lastIncludedIndex
-	//		DebugPrintf(dSnap, "S%v(T%v) Commit To %v For Snapshot", rf.me, rf.currTerm, rf.commitIndex)
-	//		rf.updateLastApplied.Broadcast()
-	//	}
-	//
-	//	// do persist
-	//	w := new(bytes.Buffer)
-	//	e := labgob.NewEncoder(w)
-	//	if e.Encode(rf.currTerm) != nil ||
-	//		e.Encode(rf.votedFor) != nil ||
-	//		e.Encode(rf.log) != nil {
-	//		DebugPrintf(dPersist, "Encode Fail")
-	//	}
-	//	data := w.Bytes()
-	//	rf.persister.SaveStateAndSnapshot(data, snapshot)
-	//	return true
-	//}
 }
 
 // the service says it has created a snapshot that has
@@ -275,6 +276,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.grabLock()
 	defer rf.releaseLock()
 
+	DebugPrintf(dSnap, "S%v(T%v) preparing for snapshot at %v, current snapshot index %v, log len %v", rf.me, rf.currTerm, index, rf.SnapshotIndex, len(rf.log))
 	// change volatile state
 	rf.SnapshotTerm = rf.logContent(index).Term
 	rf.log = rf.log[index+1-rf.SnapshotIndex-1:]
@@ -815,45 +817,48 @@ func (rf *Raft) ReceiveSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 		return
 	}
 
+	// turn off channel
+	rf.applyTurnOn = false
+
 	// TODO discard log entry
-	// change volatile state
-	if args.LastIncludedIndex >= rf.logSize() || rf.logContent(args.LastIncludedIndex).Term != args.LastIncludedTerm {
-		// discard the entire log
-		rf.log = make([]LogEntry, 0)
-		DebugPrintf(dSnap, "S%v(T%v) Discard Entire Log", rf.me, rf.currTerm)
-	} else {
-		rf.log = rf.log[args.LastIncludedIndex+1-rf.SnapshotIndex-1:]
-		DebugPrintf(dSnap, "S%v(T%v) Truncate Log", rf.me, rf.currTerm)
-	}
-	rf.SnapshotTerm = args.LastIncludedTerm
-	rf.SnapshotIndex = args.LastIncludedIndex
-	DebugPrintf(dSnap, "S%v(T%v) Snapshot At Index%v", rf.me, rf.currTerm, args.LastIncludedIndex)
-
-	// at least update commit index if necessary
-	if rf.commitIndex < args.LastIncludedIndex {
-		rf.commitIndex = args.LastIncludedIndex
-		DebugPrintf(dSnap, "S%v(T%v) Commit To %v For Snapshot", rf.me, rf.currTerm, rf.commitIndex)
-		rf.updateLastApplied.Broadcast()
-	}
-
-	// do persist
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	if e.Encode(rf.currTerm) != nil ||
-		e.Encode(rf.votedFor) != nil ||
-		e.Encode(rf.SnapshotTerm) != nil ||
-		e.Encode(rf.SnapshotIndex) != nil ||
-		e.Encode(rf.log) != nil {
-		DebugPrintf(dPersist, "Encode Fail")
-		rf.releaseLock()
-		return
-	}
-	data := w.Bytes()
-	rf.persister.SaveStateAndSnapshot(data, args.Data)
+	//// change volatile state
+	//if args.LastIncludedIndex >= rf.logSize() || rf.logContent(args.LastIncludedIndex).Term != args.LastIncludedTerm {
+	//	// discard the entire log
+	//	rf.log = make([]LogEntry, 0)
+	//	DebugPrintf(dSnap, "S%v(T%v) Discard Entire Log", rf.me, rf.currTerm)
+	//} else {
+	//	rf.log = rf.log[args.LastIncludedIndex+1-rf.SnapshotIndex-1:]
+	//	DebugPrintf(dSnap, "S%v(T%v) Truncate Log", rf.me, rf.currTerm)
+	//}
+	//rf.SnapshotTerm = args.LastIncludedTerm
+	//rf.SnapshotIndex = args.LastIncludedIndex
+	//DebugPrintf(dSnap, "S%v(T%v) Snapshot At Index%v", rf.me, rf.currTerm, args.LastIncludedIndex)
+	//
+	//// at least update commit index if necessary
+	//if rf.commitIndex < args.LastIncludedIndex {
+	//	rf.commitIndex = args.LastIncludedIndex
+	//	DebugPrintf(dSnap, "S%v(T%v) Commit To %v For Snapshot", rf.me, rf.currTerm, rf.commitIndex)
+	//	rf.updateLastApplied.Broadcast()
+	//}
+	//
+	//// do persist
+	//w := new(bytes.Buffer)
+	//e := labgob.NewEncoder(w)
+	//if e.Encode(rf.currTerm) != nil ||
+	//	e.Encode(rf.votedFor) != nil ||
+	//	e.Encode(rf.SnapshotTerm) != nil ||
+	//	e.Encode(rf.SnapshotIndex) != nil ||
+	//	e.Encode(rf.log) != nil {
+	//	DebugPrintf(dPersist, "Encode Fail")
+	//	rf.releaseLock()
+	//	return
+	//}
+	//data := w.Bytes()
+	//rf.persister.SaveStateAndSnapshot(data, args.Data)
 
 	// send snapshot to raft
-
 	rf.releaseLock()
+
 	DebugPrintf(dSnap, "S%v(T%v) Send Snapshot To Chan", rf.me, rf.currTerm)
 	rf.testMsg <- ApplyMsg{CommandValid: false, SnapshotValid: true, SnapshotTerm: args.LastIncludedTerm,
 		SnapshotIndex: args.LastIncludedIndex, Snapshot: args.Data}
@@ -1008,6 +1013,9 @@ func (rf *Raft) sendHeartBeat() {
 func (rf *Raft) applyEntry() {
 	for rf.killed() == false {
 		rf.grabLock()
+		if !rf.applyTurnOn {
+			rf.applyChange.Wait()
+		}
 		for rf.lastApplied == rf.commitIndex {
 			rf.updateLastApplied.Wait()
 		}
@@ -1059,6 +1067,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.testMsg = applyCh
 	rf.SnapshotIndex = -1
 	rf.SnapshotTerm = -1
+	rf.applyTurnOn = true
+	rf.applyChange = sync.NewCond(&rf.mu)
 
 	// Your initialization code here (2A, 2B, 2C).
 
