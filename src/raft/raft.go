@@ -137,6 +137,8 @@ type Raft struct {
 	SnapshotTerm  int  // record term of snapshot last entry
 	applyTurnOn   bool // use to turn off apply channel when snapshot
 	applyChange   *sync.Cond
+	snapTurnOn    bool // use to turn off apply channel when snapshot
+	snapChange    *sync.Cond
 }
 
 // return currentTerm and whether this server
@@ -269,9 +271,6 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	}
 	data := w.Bytes()
 	rf.persister.SaveStateAndSnapshot(data, snapshot)
-
-	rf.applyTurnOn = true
-	rf.applyChange.Broadcast()
 
 	return true
 }
@@ -820,51 +819,12 @@ func (rf *Raft) ReceiveSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 		DebugPrintf(dSnap, "S%v(T%v) <- S%v(T%v), Change Term", rf.me, rf.currTerm, args.LeaderId, args.Term)
 		rf.toFollower(args.Term)
 	}
-	//// is an old snapshot
-	//if args.LastIncludedIndex <= rf.SnapshotIndex {
-	//	DebugPrintf(dSnap, "S%v(T%v) Refuse Snapshot index%v(itself %v)", rf.me, rf.currTerm, args.LastIncludedIndex, rf.SnapshotIndex)
-	//	rf.releaseLock()
-	//	return
-	//}
 
 	// turn off channel
+	for !rf.snapTurnOn {
+		rf.snapChange.Wait()
+	}
 	rf.applyTurnOn = false
-
-	// TODO discard log entry
-	//// change volatile state
-	//if args.LastIncludedIndex >= rf.logSize() || rf.logContent(args.LastIncludedIndex).Term != args.LastIncludedTerm {
-	//	// discard the entire log
-	//	rf.log = make([]LogEntry, 0)
-	//	DebugPrintf(dSnap, "S%v(T%v) Discard Entire Log", rf.me, rf.currTerm)
-	//} else {
-	//	rf.log = rf.log[args.LastIncludedIndex+1-rf.SnapshotIndex-1:]
-	//	DebugPrintf(dSnap, "S%v(T%v) Truncate Log", rf.me, rf.currTerm)
-	//}
-	//rf.SnapshotTerm = args.LastIncludedTerm
-	//rf.SnapshotIndex = args.LastIncludedIndex
-	//DebugPrintf(dSnap, "S%v(T%v) Snapshot At Index%v", rf.me, rf.currTerm, args.LastIncludedIndex)
-	//
-	//// at least update commit index if necessary
-	//if rf.commitIndex < args.LastIncludedIndex {
-	//	rf.commitIndex = args.LastIncludedIndex
-	//	DebugPrintf(dSnap, "S%v(T%v) Commit To %v For Snapshot", rf.me, rf.currTerm, rf.commitIndex)
-	//	rf.updateLastApplied.Broadcast()
-	//}
-	//
-	//// do persist
-	//w := new(bytes.Buffer)
-	//e := labgob.NewEncoder(w)
-	//if e.Encode(rf.currTerm) != nil ||
-	//	e.Encode(rf.votedFor) != nil ||
-	//	e.Encode(rf.SnapshotTerm) != nil ||
-	//	e.Encode(rf.SnapshotIndex) != nil ||
-	//	e.Encode(rf.log) != nil {
-	//	DebugPrintf(dPersist, "Encode Fail")
-	//	rf.releaseLock()
-	//	return
-	//}
-	//data := w.Bytes()
-	//rf.persister.SaveStateAndSnapshot(data, args.Data)
 
 	// send snapshot to raft
 	rf.releaseLock()
@@ -873,6 +833,11 @@ func (rf *Raft) ReceiveSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 	rf.testMsg <- ApplyMsg{CommandValid: false, SnapshotValid: true, SnapshotTerm: args.LastIncludedTerm,
 		SnapshotIndex: args.LastIncludedIndex, Snapshot: args.Data}
 	DebugPrintf(dSnap, "S%v(T%v) End Sending Snapshot To Chan", rf.me, rf.currTerm)
+
+	rf.grabLock()
+	rf.applyTurnOn = true
+	rf.applyChange.Broadcast()
+	rf.releaseLock()
 }
 
 //
@@ -1023,9 +988,6 @@ func (rf *Raft) sendHeartBeat() {
 func (rf *Raft) applyEntry() {
 	for rf.killed() == false {
 		rf.grabLock()
-		if !rf.applyTurnOn {
-			rf.applyChange.Wait()
-		}
 		for rf.lastApplied == rf.commitIndex {
 			rf.updateLastApplied.Wait()
 		}
@@ -1034,6 +996,10 @@ func (rf *Raft) applyEntry() {
 			rf.releaseLock()
 			continue
 		}
+		for !rf.applyTurnOn {
+			rf.applyChange.Wait()
+		}
+		rf.snapTurnOn = false
 		rf.lastApplied++
 		entry := rf.logContent(rf.lastApplied).Command
 		rf.releaseLock()
@@ -1042,6 +1008,11 @@ func (rf *Raft) applyEntry() {
 		DebugPrintf(dCommit, "S%v send msg", rf.me)
 		rf.testMsg <- ApplyMsg{CommandValid: true, CommandIndex: rf.lastApplied, Command: entry}
 		DebugPrintf(dCommit, "S%v end sending msg", rf.me)
+
+		rf.grabLock()
+		rf.snapTurnOn = true
+		rf.snapChange.Broadcast()
+		rf.releaseLock()
 	}
 }
 
@@ -1079,6 +1050,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.SnapshotTerm = -1
 	rf.applyTurnOn = true
 	rf.applyChange = sync.NewCond(&rf.mu)
+	rf.snapTurnOn = true
+	rf.snapChange = sync.NewCond(&rf.mu)
 
 	// Your initialization code here (2A, 2B, 2C).
 
