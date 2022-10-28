@@ -133,12 +133,12 @@ type Raft struct {
 	testMsg           chan ApplyMsg
 
 	// lab2d
-	SnapshotIndex int  // record index of snapshot last entry
-	SnapshotTerm  int  // record term of snapshot last entry
-	applyTurnOn   bool // use to turn off apply channel when snapshot
-	applyChange   *sync.Cond
-	snapTurnOn    bool // use to turn off apply channel when snapshot
-	snapChange    *sync.Cond
+	SnapshotIndex int // record index of snapshot last entry
+	SnapshotTerm  int // record term of snapshot last entry
+	//applyTurnOn   bool // use to turn off apply channel when snapshot
+	//applyChange   *sync.Cond
+	snapTurnOn bool // use to turn off apply channel when snapshot
+	snapChange *sync.Cond
 }
 
 // return currentTerm and whether this server
@@ -230,9 +230,11 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	// is an old snapshot
 	if lastIncludedIndex <= rf.SnapshotIndex {
 		DebugPrintf(dSnap, "S%v(T%v) Refuse Snapshot index%v(itself %v)", rf.me, rf.currTerm, lastIncludedIndex, rf.SnapshotIndex)
-		rf.applyTurnOn = true
-		rf.applyChange.Broadcast()
 		return false
+	}
+
+	for !rf.snapTurnOn {
+		rf.snapChange.Wait()
 	}
 
 	// TODO discard log entry
@@ -265,8 +267,6 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 		e.Encode(rf.SnapshotIndex) != nil ||
 		e.Encode(rf.log) != nil {
 		DebugPrintf(dPersist, "Encode Fail")
-		rf.applyTurnOn = true
-		rf.applyChange.Broadcast()
 		return false
 	}
 	data := w.Bytes()
@@ -299,28 +299,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		e.Encode(rf.votedFor) != nil ||
 		e.Encode(rf.SnapshotTerm) != nil ||
 		e.Encode(rf.SnapshotIndex) != nil ||
-		e.Encode(rf.log) != nil {
-		DebugPrintf(dPersist, "Encode Fail")
-	}
-	data := w.Bytes()
-	rf.persister.SaveStateAndSnapshot(data, snapshot)
-}
-
-func (rf *Raft) snap(index int, snapshot []byte) {
-	rf.grabLock()
-	defer rf.releaseLock()
-
-	// change volatile state
-	rf.SnapshotTerm = rf.logContent(index).Term
-	rf.log = rf.log[index+1-rf.SnapshotIndex-1:]
-	rf.SnapshotIndex = index
-	DebugPrintf(dSnap, "S%v(T%v) snapshot at index%v", rf.me, rf.currTerm, index)
-
-	// do persist
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	if e.Encode(rf.currTerm) != nil ||
-		e.Encode(rf.votedFor) != nil ||
 		e.Encode(rf.log) != nil {
 		DebugPrintf(dPersist, "Encode Fail")
 	}
@@ -820,12 +798,6 @@ func (rf *Raft) ReceiveSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 		rf.toFollower(args.Term)
 	}
 
-	// turn off channel
-	for !rf.snapTurnOn {
-		rf.snapChange.Wait()
-	}
-	rf.applyTurnOn = false
-
 	// send snapshot to raft
 	rf.releaseLock()
 
@@ -833,11 +805,6 @@ func (rf *Raft) ReceiveSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 	rf.testMsg <- ApplyMsg{CommandValid: false, SnapshotValid: true, SnapshotTerm: args.LastIncludedTerm,
 		SnapshotIndex: args.LastIncludedIndex, Snapshot: args.Data}
 	DebugPrintf(dSnap, "S%v(T%v) End Sending Snapshot To Chan", rf.me, rf.currTerm)
-
-	rf.grabLock()
-	rf.applyTurnOn = true
-	rf.applyChange.Broadcast()
-	rf.releaseLock()
 }
 
 //
@@ -996,9 +963,6 @@ func (rf *Raft) applyEntry() {
 			rf.releaseLock()
 			continue
 		}
-		for !rf.applyTurnOn {
-			rf.applyChange.Wait()
-		}
 		rf.snapTurnOn = false
 		rf.lastApplied++
 		entry := rf.logContent(rf.lastApplied).Command
@@ -1048,8 +1012,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.testMsg = applyCh
 	rf.SnapshotIndex = -1
 	rf.SnapshotTerm = -1
-	rf.applyTurnOn = true
-	rf.applyChange = sync.NewCond(&rf.mu)
 	rf.snapTurnOn = true
 	rf.snapChange = sync.NewCond(&rf.mu)
 
