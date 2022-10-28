@@ -133,9 +133,9 @@ type Raft struct {
 	testMsg           chan ApplyMsg
 
 	// lab2d
-	SnapshotIndex int // record index of snapshot last entry
-	SnapshotTerm  int // record term of snapshot last entry
-	//applyTurnOn   bool // use to turn off apply channel when snapshot
+	SnapshotIndex int  // record index of snapshot last entry
+	SnapshotTerm  int  // record term of snapshot last entry
+	applyTurnOn   bool // use to turn off apply channel when snapshot
 	//applyChange   *sync.Cond
 	snapTurnOn bool // use to turn off apply channel when snapshot
 	snapChange *sync.Cond
@@ -230,11 +230,9 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	// is an old snapshot
 	if lastIncludedIndex <= rf.SnapshotIndex {
 		DebugPrintf(dSnap, "S%v(T%v) Refuse Snapshot index%v(itself %v)", rf.me, rf.currTerm, lastIncludedIndex, rf.SnapshotIndex)
+		rf.applyTurnOn = true
+		rf.updateLastApplied.Broadcast()
 		return false
-	}
-
-	for !rf.snapTurnOn {
-		rf.snapChange.Wait()
 	}
 
 	// TODO discard log entry
@@ -255,6 +253,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	if rf.commitIndex < lastIncludedIndex {
 		rf.commitIndex = lastIncludedIndex
 		DebugPrintf(dSnap, "S%v(T%v) Commit To %v For Snapshot", rf.me, rf.currTerm, rf.commitIndex)
+		DebugPrintf(dSnap, "S%v(T%v) broadcast for apply", rf.me, rf.currTerm, rf.commitIndex)
 		rf.updateLastApplied.Broadcast()
 	}
 
@@ -267,11 +266,15 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 		e.Encode(rf.SnapshotIndex) != nil ||
 		e.Encode(rf.log) != nil {
 		DebugPrintf(dPersist, "Encode Fail")
+		rf.applyTurnOn = true
+		rf.updateLastApplied.Broadcast()
 		return false
 	}
 	data := w.Bytes()
 	rf.persister.SaveStateAndSnapshot(data, snapshot)
 
+	rf.applyTurnOn = true
+	rf.updateLastApplied.Broadcast()
 	return true
 }
 
@@ -465,6 +468,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 					rf.commitIndex = args.LeaderCommit
 				}
 				DebugPrintf(dCommit, "S%v(T%v) <- S%v(T%v), Commit to %v", rf.me, rf.currTerm, args.LeaderId, args.Term, rf.commitIndex)
+				DebugPrintf(dSnap, "S%v(T%v) broadcast for apply", rf.me, rf.currTerm, rf.commitIndex)
 				rf.updateLastApplied.Broadcast()
 			}
 			return
@@ -507,6 +511,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 			rf.commitIndex = args.LeaderCommit
 		}
 		DebugPrintf(dCommit, "S%v(T%v) <- S%v(T%v), Commit to %v", rf.me, rf.currTerm, args.LeaderId, args.Term, rf.commitIndex)
+		DebugPrintf(dSnap, "S%v(T%v) broadcast for apply", rf.me, rf.currTerm, rf.commitIndex)
 		rf.updateLastApplied.Broadcast()
 	}
 }
@@ -735,6 +740,7 @@ func (rf *Raft) sendAppendEntry(term int, server int) {
 		if min_match > rf.commitIndex && rf.logContent(min_match).Term == rf.currTerm {
 			DebugPrintf(dCommit, "S%v(T%v) <- S%v(T%v), Commit To %v", rf.me, rf.currTerm, server, reply.Term, min_match)
 			rf.commitIndex = min_match
+			DebugPrintf(dSnap, "S%v(T%v) broadcast for apply", rf.me, rf.currTerm, rf.commitIndex)
 			rf.updateLastApplied.Broadcast()
 			//og_idx := rf.commitIndex + 1
 			//for idx := og_idx; idx <= rf.commitIndex; idx++ {
@@ -797,6 +803,11 @@ func (rf *Raft) ReceiveSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 		DebugPrintf(dSnap, "S%v(T%v) <- S%v(T%v), Change Term", rf.me, rf.currTerm, args.LeaderId, args.Term)
 		rf.toFollower(args.Term)
 	}
+
+	for !rf.snapTurnOn {
+		rf.snapChange.Wait()
+	}
+	rf.applyTurnOn = false
 
 	// send snapshot to raft
 	rf.releaseLock()
@@ -955,10 +966,14 @@ func (rf *Raft) sendHeartBeat() {
 func (rf *Raft) applyEntry() {
 	for rf.killed() == false {
 		rf.grabLock()
-		for rf.lastApplied == rf.commitIndex {
+		for rf.lastApplied == rf.commitIndex || !rf.applyTurnOn {
+			DebugPrintf(dTrace, "S%v goes to sleep", rf.me)
 			rf.updateLastApplied.Wait()
+			DebugPrintf(dTrace, "S%v wake up from sleep", rf.me)
 		}
+		DebugPrintf(dTrace, "S%v is updating lastApplied", rf.me)
 		if rf.lastApplied < rf.SnapshotIndex {
+			DebugPrintf(dTrace, "S%v leaves for snapshot", rf.me)
 			rf.lastApplied = rf.SnapshotIndex
 			rf.releaseLock()
 			continue
@@ -1013,6 +1028,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.SnapshotIndex = -1
 	rf.SnapshotTerm = -1
 	rf.snapTurnOn = true
+	rf.applyTurnOn = true
 	rf.snapChange = sync.NewCond(&rf.mu)
 
 	// Your initialization code here (2A, 2B, 2C).
